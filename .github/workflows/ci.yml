@@ -520,25 +520,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python 3.12.13 for Windows checks
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12.13"
-
-      - name: Run unit tests and compile on Windows
-        shell: pwsh
-        run: |
-          python -m unittest discover -s tests -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
       - name: Set up pinned uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.12.2"
           enable-cache: true
           cache-dependency-glob: uv.lock
+
+      - name: Run unit tests and compile with exact Python 3.12.13
+        shell: pwsh
+        run: |
+          uv python install 3.12.13
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-project --python 3.12.13 python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv run --no-project --python 3.12.13 python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Parse PowerShell installer on Windows
         shell: pwsh
