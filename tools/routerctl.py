@@ -86,6 +86,22 @@ def windows_system_command(name: str) -> str:
     return str(path)
 
 
+def windows_clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    system_dir = windows_system_directory()
+    windows_dir = system_dir.parent
+    environment = {
+        "SystemRoot": str(windows_dir),
+        "WINDIR": str(windows_dir),
+        "COMSPEC": str(system_dir / "cmd.exe"),
+        "PATH": str(system_dir),
+        "TEMP": os.environ.get("TEMP", str(windows_dir / "Temp")),
+        "TMP": os.environ.get("TMP", str(windows_dir / "Temp")),
+    }
+    if extra:
+        environment.update(extra)
+    return environment
+
+
 def posix_system_command(name: str) -> str:
     if os.name == "nt" or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
         raise ConfigError("invalid POSIX system command request")
@@ -803,6 +819,7 @@ def current_windows_sid() -> str:
         ],
         capture_output=True,
         text=True,
+        env=windows_clean_environment(),
         check=False,
     )
     sid = result.stdout.strip()
@@ -819,8 +836,8 @@ def restrict_windows_directory(path: Path) -> None:
     sid = current_windows_sid()
     script = r"""
 $ErrorActionPreference = 'Stop'
-$target = $args[0]
-$sidText = $args[1]
+$target = $env:ICA_ROUTER_ACL_TARGET
+$sidText = $env:ICA_ROUTER_ACL_SID
 $sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
 $acl = New-Object System.Security.AccessControl.DirectorySecurity
 $acl.SetAccessRuleProtection($true, $false)
@@ -842,11 +859,15 @@ foreach ($entry in $allowed) {
     result = subprocess.run(
         [
             windows_powershell(), "-NoProfile", "-NonInteractive", "-Command",
-            script, str(path), sid,
+            script,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
+        env=windows_clean_environment({
+            "ICA_ROUTER_ACL_TARGET": str(path),
+            "ICA_ROUTER_ACL_SID": sid,
+        }),
         check=False,
     )
     if result.returncode != 0:
@@ -860,10 +881,10 @@ def _run_windows_acl_check(path: Path, set_acl: bool) -> None:
     sid = current_windows_sid()
     script = r"""
 $ErrorActionPreference = 'Stop'
-$target = $args[0]
-$sidText = $args[1]
+$target = $env:ICA_ROUTER_ACL_TARGET
+$sidText = $env:ICA_ROUTER_ACL_SID
 $sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
-if ($args[2] -eq 'set') {
+if ($env:ICA_ROUTER_ACL_MODE -eq 'set') {
   $acl = New-Object System.Security.AccessControl.FileSecurity
   $acl.SetAccessRuleProtection($true, $false)
   $acl.SetOwner($sid)
@@ -888,13 +909,15 @@ foreach ($entry in $allowed) {
             "-NonInteractive",
             "-Command",
             script,
-            str(path),
-            sid,
-            "set" if set_acl else "verify",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
+        env=windows_clean_environment({
+            "ICA_ROUTER_ACL_TARGET": str(path),
+            "ICA_ROUTER_ACL_SID": sid,
+            "ICA_ROUTER_ACL_MODE": "set" if set_acl else "verify",
+        }),
         check=False,
     )
     if result.returncode != 0:
