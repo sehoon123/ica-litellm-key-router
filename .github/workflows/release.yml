@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      PYTHONDONTWRITEBYTECODE: "1"
       GH_TOKEN: ${{ github.token }}
 
     steps:

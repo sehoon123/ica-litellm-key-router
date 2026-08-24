@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
       - name: Check out source
@@ -310,7 +310,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
       - name: Check out source
@@ -506,7 +506,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
       - name: Check out source
