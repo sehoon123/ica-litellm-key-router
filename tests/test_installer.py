@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install-linux.sh"
 
 
+@unittest.skipIf(os.name == "nt", "Linux installer tests")
 class LinuxInstallerFastPathTests(unittest.TestCase):
     def make_existing_install(self, base: Path) -> tuple[Path, Path, Path]:
         home = base / "home"

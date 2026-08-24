@@ -38,6 +38,7 @@ DEFAULT_COOLDOWN_SECONDS = 60
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_KEYS_PER_POOL = 256
 DEPRECATED_POOL_IDS = {"ibm-ica-nextgen"}
+_WINDOWS_SID_CACHE: str | None = None
 DEPRECATED_CLIENT_PROVIDER_IDS = {
     "ibm-ica-router",
     "ibm-ica-claude-router",
@@ -850,6 +851,9 @@ def load_state(state_dir: Path, catalog_path: Path) -> tuple[dict[str, Any], dic
 
 
 def current_windows_sid() -> str:
+    global _WINDOWS_SID_CACHE
+    if _WINDOWS_SID_CACHE is not None:
+        return _WINDOWS_SID_CACHE
     result = subprocess.run(
         [
             windows_powershell(),
@@ -866,6 +870,7 @@ def current_windows_sid() -> str:
     sid = result.stdout.strip()
     if result.returncode != 0 or not re.fullmatch(r"S-1-(?:\d+-)+\d+", sid):
         raise ConfigError("could not resolve the current Windows user SID")
+    _WINDOWS_SID_CACHE = sid
     return sid
 
 

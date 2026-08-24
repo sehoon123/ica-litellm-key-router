@@ -19,6 +19,18 @@ SPEC.loader.exec_module(routerctl)
 
 class RouterConfigTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Unit tests cover routing/state logic. The hosted Windows installer
+        # smoke test exercises the real owner-only ACL implementation once,
+        # without spawning hundreds of nested PowerShell processes here.
+        if os.name == "nt":
+            for name in (
+                "restrict_windows_directory",
+                "restrict_windows_file",
+                "verify_windows_private_file",
+            ):
+                patcher = mock.patch.object(routerctl, name, return_value=None)
+                patcher.start()
+                self.addCleanup(patcher.stop)
         self.catalog = routerctl.validate_catalog(json.loads((ROOT / "catalog.json").read_text()))
         self.secrets = {
             "schemaVersion": 1,
