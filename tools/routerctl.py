@@ -185,9 +185,17 @@ def atomic_write(path: Path, text: str, private: bool = False) -> None:
         if private and os.name != "nt":
             os.fchmod(fd, 0o600)
         elif private:
-            # Restrict the empty temp file before any secret bytes are written.
+            # Windows may deny Set-Acl while the CRT mkstemp handle is open.
+            # Close it, restrict the still-empty file, then reopen for content.
+            os.close(fd)
+            fd = -1
             restrict_windows_file(tmp)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        if fd >= 0:
+            handle_context = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+            fd = -1
+        else:
+            handle_context = tmp.open("w", encoding="utf-8", newline="\n")
+        with handle_context as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -197,6 +205,8 @@ def atomic_write(path: Path, text: str, private: bool = False) -> None:
         elif private:
             verify_windows_private_file(path)
     finally:
+        if fd >= 0:
+            os.close(fd)
         try:
             tmp.unlink()
         except FileNotFoundError:
@@ -229,7 +239,10 @@ def backup_file(path: Path) -> Path | None:
             except FileExistsError:
                 counter += 1
         if os.name == "nt":
+            os.close(output_fd)
+            output_fd = None
             restrict_windows_file(candidate)
+            output_fd = os.open(candidate, os.O_WRONLY | os.O_TRUNC)
         with os.fdopen(source_fd, "rb", closefd=False) as source, os.fdopen(
             output_fd, "wb", closefd=False
         ) as output:
@@ -1083,12 +1096,16 @@ def command_lock(state_dir: Path) -> Iterator[None]:
     ensure_private_directory(state_dir)
     lock_path = state_dir / "command.lock"
     _reject_unsafe_existing_file(lock_path, "command lock")
-    handle = lock_path.open("a+b")
-    acquired = False
-    if os.name != "nt":
-        os.chmod(lock_path, 0o600)
-    else:
+    if os.name == "nt":
+        # Set the DACL with no CRT handle open, then lock the stable file.
+        with lock_path.open("a+b"):
+            pass
         restrict_windows_file(lock_path)
+        handle = lock_path.open("a+b")
+    else:
+        handle = lock_path.open("a+b")
+        os.chmod(lock_path, 0o600)
+    acquired = False
     try:
         if os.name == "nt":
             import msvcrt
