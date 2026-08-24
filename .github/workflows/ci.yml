@@ -99,8 +99,14 @@ jobs:
           import json
           from pathlib import Path
           import re
+          import subprocess
 
           root = Path.cwd()
+          tracked_paths = [
+              root / name
+              for name in subprocess.check_output(["git", "ls-files", "-z"]).decode("utf-8").split("\0")
+              if name
+          ]
           example_path = root / "examples" / "secrets.example.json"
           example = json.loads(example_path.read_text(encoding="utf-8"))
 
@@ -181,7 +187,7 @@ jobs:
           text_suffixes = {".json", ".lock", ".md", ".ps1", ".py", ".sh", ".toml", ".yaml", ".yml"}
           text_names = {".gitignore", "LICENSE", "VERSION"}
           scan_paths: list[Path] = []
-          for path in root.rglob("*"):
+          for path in tracked_paths:
               if not path.is_file() or ".git" in path.parts:
                   continue
               relative = path.relative_to(root)
@@ -218,7 +224,7 @@ jobs:
               ".env", "secrets.json", "key-rotator.json", "config.yaml",
               "client-models.generated.json", "runtime.json", "generation.json", "run.json",
           }
-          for path in root.rglob("*"):
+          for path in tracked_paths:
               if not path.is_file() or ".git" in path.parts:
                   continue
               if path.name in forbidden_names:
