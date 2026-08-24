@@ -1,0 +1,29 @@
+# Local secrets and generated runtime state
+secrets.json
+key-rotator.json
+config.yaml
+client-models.generated.json
+runtime.json
+generation.json
+run.json
+state/
+.env
+.env.*
+proxy.env
+*.log
+*.pid
+*.backup-*
+.install.lock/
+
+# Environments and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.coverage
+*.py[cod]
+
+# Release artifacts
+dist/
+*.zip
+*.tar.gz

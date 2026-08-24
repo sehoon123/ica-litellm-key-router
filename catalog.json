@@ -1,0 +1,512 @@
+{
+  "schemaVersion": 1,
+  "pools": [
+    {
+      "id": "ibm-ica-nextgen",
+      "providers": [
+        "ibm-ica",
+        "ibm-ica-claude",
+        "ibm-ica-gemini"
+      ]
+    },
+    {
+      "id": "ica-services-essentials",
+      "providers": [
+        "ica-se-openai",
+        "ica-se-claude",
+        "ica-se-gemini"
+      ]
+    }
+  ],
+  "providers": {
+    "ibm-ica": {
+      "name": "IBM ICA (OpenAI)",
+      "baseUrl": "https://api.nextgen-beta.ica.ibm.com/ica/v1",
+      "api": "azure-openai-responses",
+      "models": [
+        {
+          "id": "gpt-5.5-gus",
+          "name": "GPT-5.5 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "max": "max",
+            "xhigh": "xhigh",
+            "high": "high",
+            "medium": "medium",
+            "low": "low"
+          }
+        },
+        {
+          "id": "gpt-5.6-luna-dzus",
+          "name": "GPT-5.6 Luna (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "max": "max",
+            "xhigh": "xhigh",
+            "high": "high",
+            "medium": "medium",
+            "low": "low"
+          }
+        },
+        {
+          "id": "gpt-5.6-terra-dzus",
+          "name": "GPT-5.6 Terra (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "max": "max",
+            "xhigh": "xhigh",
+            "high": "high",
+            "medium": "medium",
+            "low": "low"
+          }
+        }
+      ]
+    },
+    "ibm-ica-claude": {
+      "name": "IBM ICA (Claude)",
+      "baseUrl": "https://api.nextgen-beta.ica.ibm.com/ica",
+      "api": "anthropic-messages",
+      "compat": {
+        "forceAdaptiveThinking": true
+      },
+      "models": [
+        {
+          "id": "claude-sonnet-4-5",
+          "name": "Claude Sonnet 4.5 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 3,
+            "output": 15,
+            "cacheRead": 0.3,
+            "cacheWrite": 3.75
+          }
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 3,
+            "output": 15,
+            "cacheRead": 0.3,
+            "cacheWrite": 3.75
+          }
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 2,
+            "output": 10,
+            "cacheRead": 0.2,
+            "cacheWrite": 2.5
+          }
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-opus-4-7",
+          "name": "Claude Opus 4.7 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-opus-5",
+          "name": "Claude Opus 5 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5 (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 200000,
+          "maxTokens": 64000
+        }
+      ]
+    },
+    "ibm-ica-gemini": {
+      "name": "IBM ICA (Gemini)",
+      "baseUrl": "https://api.nextgen-beta.ica.ibm.com/ica/v1beta",
+      "api": "google-generative-ai",
+      "models": [
+        {
+          "id": "gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro Preview (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "name": "Gemini 3.6 Flash (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "name": "Gemini 3.5 Flash (ICA)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        }
+      ]
+    },
+    "ica-se-openai": {
+      "name": "ICA SE (OpenAI)",
+      "baseUrl": "https://api.servicesessentials.ibm.com/v1",
+      "api": "azure-openai-responses",
+      "models": [
+        {
+          "id": "gpt-5.6-luna-dzus",
+          "name": "GPT-5.6 Luna (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "max": "max",
+            "xhigh": "xhigh",
+            "high": "high",
+            "medium": "medium",
+            "low": "low"
+          }
+        },
+        {
+          "id": "gpt-5.6-terra-dzus",
+          "name": "GPT-5.6 Terra (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "max": "max",
+            "xhigh": "xhigh",
+            "high": "high",
+            "medium": "medium",
+            "low": "low"
+          }
+        }
+      ]
+    },
+    "ica-se-claude": {
+      "name": "ICA SE (Claude)",
+      "baseUrl": "https://api.servicesessentials.ibm.com",
+      "api": "anthropic-messages",
+      "compat": {
+        "forceAdaptiveThinking": true
+      },
+      "models": [
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 3,
+            "output": 15,
+            "cacheRead": 0.3,
+            "cacheWrite": 3.75
+          }
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5 (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 2,
+            "output": 10,
+            "cacheRead": 0.2,
+            "cacheWrite": 2.5
+          }
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6 (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8 (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 64000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-opus-5",
+          "name": "Claude Opus 5 (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "cost": {
+            "input": 5,
+            "output": 25,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5 (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 200000,
+          "maxTokens": 64000
+        }
+      ]
+    },
+    "ica-se-gemini": {
+      "name": "ICA SE (Gemini)",
+      "baseUrl": "https://api.servicesessentials.ibm.com/v1beta",
+      "api": "google-generative-ai",
+      "models": [
+        {
+          "id": "gemini-3.7-flash",
+          "name": "Gemini 3.7 Flash (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "cost": {
+            "input": 0.75,
+            "output": 3.75,
+            "cacheRead": 0.075,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "name": "Gemini 3.6 Flash (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "name": "Gemini 3.5 Flash (SE)",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        }
+      ]
+    }
+  }
+}

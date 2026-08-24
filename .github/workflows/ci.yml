@@ -1,0 +1,754 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Tests and static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.13"
+
+      - name: Set up pinned uv for lock validation
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.2"
+          enable-cache: false
+
+      - name: Validate frozen lock file
+        run: uv lock --check
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python sources
+        run: python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+
+      - name: Check Bash syntax
+        run: bash -n install-linux.sh
+
+      - name: Guard Linux atomic current-pointer replacement
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import tempfile
+
+          installer = Path("install-linux.sh").read_text(encoding="utf-8")
+          if "os.replace(sys.argv[1], sys.argv[2])" not in installer:
+              raise SystemExit("Linux installer must replace current without following the old symlink")
+          with tempfile.TemporaryDirectory() as tmp:
+              root = Path(tmp)
+              old_release = root / "old"
+              new_release = root / "new"
+              old_release.mkdir()
+              new_release.mkdir()
+              current = root / "current"
+              candidate = root / ".current.new"
+              current.symlink_to(old_release, target_is_directory=True)
+              candidate.symlink_to(new_release, target_is_directory=True)
+              os.replace(candidate, current)
+              if current.resolve() != new_release.resolve() or candidate.exists():
+                  raise SystemExit("atomic current-pointer replacement regression")
+          PY
+
+      - name: Parse PowerShell installer on Ubuntu
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install-windows.ps1),
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+      - name: Validate public files contain placeholders only
+        shell: bash
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+          import re
+
+          root = Path.cwd()
+          example_path = root / "examples" / "secrets.example.json"
+          example = json.loads(example_path.read_text(encoding="utf-8"))
+
+          errors: list[str] = []
+          placeholder = re.compile(r"^REPLACE_ME(?:[A-Z0-9_-]*)$")
+
+          def require_placeholder(value: object, location: str) -> None:
+              if not isinstance(value, str) or placeholder.fullmatch(value) is None:
+                  errors.append(f"{location} must contain a REPLACE_ME placeholder")
+
+          if example.get("schemaVersion") != 1:
+              errors.append("examples/secrets.example.json must use schemaVersion 1")
+          require_placeholder(example.get("masterKey"), "example masterKey")
+
+          expected_pools = {"ibm-ica-nextgen", "ica-services-essentials"}
+          pools = example.get("pools")
+          if not isinstance(pools, dict) or set(pools) != expected_pools:
+              errors.append("example must contain exactly the two catalog credential pools")
+          else:
+              for pool_id, pool in pools.items():
+                  keys = pool.get("keys") if isinstance(pool, dict) else None
+                  if not isinstance(keys, list) or len(keys) < 2:
+                      errors.append(f"example pool {pool_id} must contain at least two keys")
+                      continue
+                  for index, entry in enumerate(keys):
+                      if not isinstance(entry, dict):
+                          errors.append(f"example pool {pool_id} key {index} is not an object")
+                          continue
+                      require_placeholder(entry.get("value"), f"{pool_id} key {index} value")
+
+          public_paths = [
+              root / "README.md",
+              root / "README.ko.md",
+              root / "SECURITY.md",
+              example_path,
+              root / ".github" / "workflows" / "ci.yml",
+          ]
+          for path in public_paths:
+              if not path.is_file():
+                  errors.append(f"required public file is missing: {path.relative_to(root)}")
+
+          catalog = json.loads((root / "catalog.json").read_text(encoding="utf-8"))
+          aliases = {
+              f"{provider_id}--{model['id']}"
+              for provider_id, provider in catalog["providers"].items()
+              for model in provider["models"]
+          }
+          client_providers = {f"{provider_id}-router" for provider_id in catalog["providers"]}
+          if len(aliases) != 25 or len(client_providers) != 6:
+              errors.append("catalog must generate exactly 25 aliases and 6 client providers")
+          for path in (root / "README.md", root / "README.ko.md"):
+              if not path.is_file():
+                  continue
+              text = path.read_text(encoding="utf-8")
+              for value in sorted(aliases | client_providers):
+                  if f"`{value}`" not in text:
+                      errors.append(f"{path.name} does not document catalog value {value}")
+              for endpoint in ("/v1/responses", "/v1/messages", "/v1beta/models/{model}:generateContent"):
+                  if endpoint not in text:
+                      errors.append(f"{path.name} does not document native endpoint {endpoint}")
+
+          token_patterns = {
+              "OpenAI-style key": re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
+              "Anthropic-style key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{16,}"),
+              "Google API key": re.compile(r"\bAIza[0-9A-Za-z_-]{20,}"),
+              "GitHub token": re.compile(r"\b(?:gh[opusr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
+              "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+              "private key block": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+          }
+          allowed_test_tokens = {
+              "sk-local-test-master-key-1234567890",
+              "sk-nextgen-test-value-a",
+              "sk-nextgen-test-value-b",
+              "sk-services-test-value-a",
+              "sk-services-test-value-b",
+              "sk-services-test-value-c",
+          }
+          text_suffixes = {".json", ".lock", ".md", ".ps1", ".py", ".sh", ".toml", ".yaml", ".yml"}
+          text_names = {".gitignore", "LICENSE", "VERSION"}
+          scan_paths: list[Path] = []
+          for path in root.rglob("*"):
+              if not path.is_file() or ".git" in path.parts:
+                  continue
+              relative = path.relative_to(root)
+              if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}:
+                  errors.append(f"Python cache must not be committed: {relative}")
+                  continue
+              if "dist" in relative.parts or path.suffix in {".zip", ".gz", ".tgz"}:
+                  errors.append(f"release debris must not be committed: {relative}")
+                  continue
+              if path.suffix in text_suffixes or path.name in text_names:
+                  scan_paths.append(path)
+
+          for path in scan_paths:
+              text = path.read_text(encoding="utf-8")
+              relative = path.relative_to(root)
+              for label, pattern in token_patterns.items():
+                  for match in pattern.finditer(text):
+                      value = match.group(0)
+                      if value in allowed_test_tokens:
+                          continue
+                      line_number = text.count("\n", 0, match.start()) + 1
+                      errors.append(f"{relative}:{line_number} contains a possible {label}")
+          for path in (root / "README.md", root / "README.ko.md"):
+              text = path.read_text(encoding="utf-8")
+              assignments = re.findall(r"ICA_ROUTER_MASTER_KEY=['\"]([^'\"]+)['\"]", text)
+              if not assignments:
+                  errors.append(f"{path.name} has no placeholder endpoint credential example")
+              for value in assignments:
+                  require_placeholder(value, f"{path.name} endpoint credential")
+              for field, value in re.findall(r'"(masterKey|value)"\s*:\s*"([^"]+)"', text):
+                  require_placeholder(value, f"{path.name} JSON {field}")
+
+          forbidden_names = {
+              ".env", "secrets.json", "key-rotator.json", "config.yaml",
+              "client-models.generated.json", "runtime.json", "generation.json", "run.json",
+          }
+          for path in root.rglob("*"):
+              if not path.is_file() or ".git" in path.parts:
+                  continue
+              if path.name in forbidden_names:
+                  errors.append(f"private local configuration must not be committed: {path.relative_to(root)}")
+              if "state" in path.relative_to(root).parts:
+                  errors.append(f"generated state must not be committed: {path.relative_to(root)}")
+
+          workflow_root = root / ".github" / "workflows"
+          workflow_paths = sorted([*workflow_root.glob("*.yml"), *workflow_root.glob("*.yaml")])
+          github_secret_expression = "$" + "{{" + " secrets."
+          for workflow_path in workflow_paths:
+              workflow_text = workflow_path.read_text(encoding="utf-8")
+              if github_secret_expression in workflow_text:
+                  errors.append(f"workflow must not require repository secrets: {workflow_path.relative_to(root)}")
+              for action, reference in re.findall(r"^\s*uses:\s*([^@\s]+)@([^#\s]+)", workflow_text, re.MULTILINE):
+                  if not re.fullmatch(r"[0-9a-f]{40}", reference):
+                      errors.append(
+                          f"third-party action must use a full commit SHA: {workflow_path.relative_to(root)}: {action}@{reference}"
+                      )
+
+          if errors:
+              raise SystemExit("\n".join(f"ERROR: {error}" for error in errors))
+          print("Public secret examples use placeholders; no private local config was found.")
+          PY
+
+      - name: Build deterministic release ZIP and verify its exact checksum sidecar
+        run: |
+          set -euo pipefail
+          first="$RUNNER_TEMP/release-first"
+          second="$RUNNER_TEMP/release-second"
+          python scripts/build-release.py --development --output-dir "$first"
+          python scripts/build-release.py --development --output-dir "$second"
+          diff --brief --recursive "$first" "$second"
+          asset="ica-litellm-key-router-v$(cat VERSION).zip"
+          (cd "$first" && sha256sum --check --strict SHA256SUMS)
+          python - "$first" "$asset" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+          import re
+          import stat
+          import sys
+          import zipfile
+
+          output = Path(sys.argv[1])
+          asset_name = sys.argv[2]
+          archive = output / asset_name
+          sidecar = (output / f"{asset_name}.sha256").read_text(encoding="ascii")
+          match = re.fullmatch(r"([0-9a-f]{64})  ([^\r\n]+)\n", sidecar)
+          assert match and match.group(2) == asset_name
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          assert match.group(1) == digest
+          manifest = json.loads((output / "release-manifest.json").read_text(encoding="utf-8"))
+          assert manifest["schemaVersion"] == 1
+          assert re.fullmatch(r"[0-9a-f]{40,64}", manifest["sourceCommit"])
+          assert manifest["assets"][asset_name]["sha256"] == digest
+          assert set(manifest["assets"]) == {
+              asset_name, "install-linux.sh", "install-windows.ps1"
+          }
+          assert (output / "install-linux.sh").read_bytes() == Path("install-linux.sh").read_bytes()
+          assert (output / "install-windows.ps1").read_bytes() == Path("install-windows.ps1").read_bytes()
+          top = asset_name.removesuffix(".zip")
+          required = {
+              f"{top}/README.md",
+              f"{top}/README.ko.md",
+              f"{top}/SECURITY.md",
+              f"{top}/install-linux.sh",
+              f"{top}/install-windows.ps1",
+              f"{top}/catalog.json",
+              f"{top}/tools/routerctl.py",
+              f"{top}/uv.lock",
+          }
+          with zipfile.ZipFile(archive) as zf:
+              infos = zf.infolist()
+              names = {info.filename for info in infos}
+              assert required <= names
+              assert all(PurePosixPath(name).parts[0] == top for name in names)
+              assert len(names) == len(infos)
+              for info in infos:
+                  parts = PurePosixPath(info.filename).parts
+                  assert not any(part in {"__pycache__", "state", "dist"} for part in parts)
+                  assert not info.filename.endswith((".pyc", ".pyo"))
+                  mode = (info.external_attr >> 16) & 0xFFFF
+                  assert not mode or stat.S_ISREG(mode) or stat.S_ISDIR(mode)
+          PY
+
+  linux-installer:
+    name: Linux installer smoke test (dummy keys)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install twice and test the Linux lifecycle with dummy values
+        shell: bash
+        run: |
+          set -euo pipefail
+          home_dir="$RUNNER_TEMP/home [ci] \$ \`"
+          install_root="$RUNNER_TEMP/ICA router [ci] \$ \`"
+          rotator_path="$RUNNER_TEMP/key rotator [ci] \$ \`.json"
+          wrapper="$install_root/ica-router"
+          unrelated_pid=""
+
+          cleanup() {
+            set +e
+            if [[ -x "$wrapper" ]]; then "$wrapper" stop >/dev/null 2>&1; fi
+            if [[ -n "$unrelated_pid" ]]; then
+              kill "$unrelated_pid" >/dev/null 2>&1
+              wait "$unrelated_pid" >/dev/null 2>&1
+            fi
+            rm -rf -- "$install_root" "$home_dir" "$rotator_path"
+          }
+          trap cleanup EXIT
+
+          mkdir -m 700 -- "$home_dir" "$home_dir/.pi" "$home_dir/.pi/agent"
+          export HOME="$home_dir"
+          client_path="$HOME/.pi/agent/models.json"
+          printf '%s\n' '{"providers":{"keep-ci-dummy":{"baseUrl":"http://127.0.0.1:9"}}}' > "$client_path"
+          chmod 600 "$client_path"
+
+          python3 - "$rotator_path" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          document = {
+              "pools": [
+                  {
+                      "poolId": "ibm-ica-nextgen",
+                      "keys": [
+                          {"id": "ci-nextgen-a", "value": "ci-dummy-not-a-provider-key-nextgen-a"},
+                          {"id": "ci-nextgen-b", "value": "ci-dummy-not-a-provider-key-nextgen-b"},
+                      ],
+                  },
+                  {
+                      "poolId": "ica-services-essentials",
+                      "keys": [
+                          {"id": "ci-services-a", "value": "ci-dummy-not-a-provider-key-services-a"},
+                          {"id": "ci-services-b", "value": "ci-dummy-not-a-provider-key-services-b"},
+                      ],
+                  },
+              ]
+          }
+          Path(sys.argv[1]).write_text(json.dumps(document), encoding="utf-8")
+          PY
+          chmod 600 "$rotator_path"
+
+          export ICA_ROUTER_HOME="$install_root"
+          export ICA_ROUTER_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export ICA_ROUTER_KEY_ROTATOR="$rotator_path"
+          export ICA_ROUTER_NON_INTERACTIVE=1
+
+          bash ./install-linux.sh
+          first_release="$(readlink -f -- "$install_root/current")"
+          [[ -d "$first_release" ]]
+
+          bash ./install-linux.sh
+          second_release="$(readlink -f -- "$install_root/current")"
+          [[ -d "$second_release" && "$second_release" != "$first_release" ]]
+          release_count="$(find "$install_root/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+          [[ "$release_count" -ge 2 ]]
+
+          "$wrapper" doctor
+          "$wrapper" status
+
+          python_bin="$second_release/.venv/bin/python"
+          "$python_bin" - "$install_root" "$client_path" <<'PY'
+          from importlib.metadata import version
+          import json
+          from pathlib import Path
+          import platform
+          import sys
+
+          root = Path(sys.argv[1])
+          client_path = Path(sys.argv[2])
+          state = root / "state"
+          catalog = json.loads((root / "current" / "app" / "catalog.json").read_text())
+          generated = json.loads((state / "client-models.generated.json").read_text())
+          config = json.loads((state / "config.yaml").read_text())
+          secrets = json.loads((state / "secrets.json").read_text())
+          client = json.loads(client_path.read_text())
+          aliases = {
+              f"{provider_id}/{model['id']}"
+              for provider_id, provider in catalog["providers"].items()
+              for model in provider["models"]
+          }
+          assert platform.python_version() == "3.12.13"
+          assert version("litellm") == "1.98.0"
+          assert len(catalog["providers"]) == 6
+          assert len(aliases) == 25
+          assert len(generated["providers"]) == 6
+          assert len(config["model_list"]) == 50
+          assert set(secrets["pools"]) == {"ibm-ica-nextgen", "ica-services-essentials"}
+          assert all(len(pool["keys"]) == 2 for pool in secrets["pools"].values())
+          assert "keep-ci-dummy" in client["providers"]
+          assert len(client["providers"]) == 7
+          PY
+          [[ "$("$install_root/tools/uv-0.12.2/uv" --version)" == "uv 0.12.2"* ]]
+
+          shopt -s nullglob
+          client_backups=("$client_path".backup-*)
+          (( ${#client_backups[@]} >= 1 ))
+          for private_dir in             "$install_root" "$install_root/state" "$install_root/releases"             "$install_root/tools" "$install_root/tools/uv-0.12.2" "$install_root/cache"             "$first_release" "$second_release" "$second_release/app" "$second_release/.venv"; do
+            [[ "$(stat -c '%a' "$private_dir")" == "700" ]]
+          done
+          [[ "$(stat -c '%a' "$wrapper")" == "700" ]]
+          for private_file in "$client_path" "${client_backups[@]}"; do
+            [[ "$(stat -c '%a' "$private_file")" == "600" ]]
+          done
+          while IFS= read -r -d '' private_file; do
+            [[ "$(stat -c '%a' "$private_file")" == "600" ]]
+          done < <(find "$install_root/state" -type f -print0)
+          while IFS= read -r -d '' private_dir; do
+            [[ "$(stat -c '%a' "$private_dir")" == "700" ]]
+          done < <(find "$install_root/state" -type d -print0)
+
+          run_template="$RUNNER_TEMP/linux-run-template.json"
+          cp -- "$install_root/state/run.json" "$run_template"
+          "$wrapper" stop
+          set +e
+          "$wrapper" status >/dev/null
+          status_code=$?
+          set -e
+          [[ "$status_code" -eq 1 ]]
+
+          "$wrapper" start
+          "$wrapper" status
+          cp -- "$install_root/state/run.json" "$run_template"
+          "$wrapper" stop
+
+          python3 -c 'import time; time.sleep(120)' &
+          unrelated_pid=$!
+          python3 - "$run_template" "$install_root/state/run.json" "$unrelated_pid" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          template, output, pid_text = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+          pid = int(pid_text)
+          raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+          closing = raw.rfind(")")
+          fields_after_comm = raw[closing + 2:].split()
+          boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+          document = json.loads(template.read_text(encoding="utf-8"))
+          document["pid"] = pid
+          document["startToken"] = f"linux:{boot_id}:{fields_after_comm[19]}"
+          output.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+          os.chmod(output, 0o600)
+          PY
+
+          set +e
+          "$wrapper" status >/dev/null
+          stale_status=$?
+          "$wrapper" stop >/dev/null 2>&1
+          stale_stop=$?
+          set -e
+          [[ "$stale_status" -eq 3 && "$stale_stop" -eq 2 ]]
+          kill -0 "$unrelated_pid"
+          kill "$unrelated_pid"
+          wait "$unrelated_pid" || true
+          unrelated_pid=""
+          rm -f -- "$install_root/state/run.json"
+
+          pointer_before="$(readlink -f -- "$install_root/current")"
+          mkdir -m 700 -- "$install_root/.install.lock"
+          printf '%s\n' "$$" > "$install_root/.install.lock/pid"
+          set +e
+          lock_output="$(bash ./install-linux.sh 2>&1)"
+          lock_status=$?
+          set -e
+          [[ "$lock_status" -ne 0 ]]
+          grep -Fq "another installer is running" <<<"$lock_output"
+          [[ "$(readlink -f -- "$install_root/current")" == "$pointer_before" ]]
+          rm -rf -- "$install_root/.install.lock"
+
+  windows-installer:
+    name: Windows installer smoke test (dummy keys)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12.13 for Windows checks
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.13"
+
+      - name: Run unit tests and compile on Windows
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.2"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Parse PowerShell installer on Windows
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install-windows.ps1),
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            $parseErrors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+      - name: Install, validate, and start with ephemeral dummy values
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          # Exercise quoting through spaces and shell-significant path characters.
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router ci [path] $ tick`'
+          $rotatorPath = Join-Path $env:RUNNER_TEMP 'key rotator [ci] $.json'
+
+          function New-DummyValue([string]$label) {
+            return "ci-dummy-not-a-provider-key-$label-$([guid]::NewGuid().ToString('N'))"
+          }
+
+          $rotator = @{
+            pools = @(
+              @{
+                poolId = "ibm-ica-nextgen"
+                keys = @(
+                  @{ id = "ci-nextgen-a"; value = (New-DummyValue "nextgen-a") },
+                  @{ id = "ci-nextgen-b"; value = (New-DummyValue "nextgen-b") }
+                )
+              },
+              @{
+                poolId = "ica-services-essentials"
+                keys = @(
+                  @{ id = "ci-services-a"; value = (New-DummyValue "services-a") },
+                  @{ id = "ci-services-b"; value = (New-DummyValue "services-b") }
+                )
+              }
+            )
+          }
+          $rotator | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $rotatorPath -Encoding UTF8
+
+          $clientRoot = Join-Path $HOME ".pi"
+          if (Test-Path -LiteralPath $clientRoot) { throw "Unexpected pre-existing CI client directory: $clientRoot" }
+          $clientAgentDir = Join-Path $clientRoot "agent"
+          New-Item -ItemType Directory -Force -Path $clientAgentDir | Out-Null
+          $clientPath = Join-Path $clientAgentDir "models.json"
+          @{ providers = @{ "keep-ci-dummy" = @{ baseUrl = "http://127.0.0.1:9" } } } |
+            ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $clientPath -Encoding UTF8
+
+          $sourceDirectory = (Resolve-Path .).Path
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
+            -InstallRoot $installRoot `
+            -SourceDirectory $sourceDirectory `
+            -KeyRotatorPath $rotatorPath `
+            -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
+          $currentPointer = Join-Path $installRoot "current"
+          $firstRelease = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
+
+          # A second local-source install exercises update, old-process stop, and pointer switch.
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
+            -InstallRoot $installRoot `
+            -SourceDirectory $sourceDirectory `
+            -KeyRotatorPath $rotatorPath `
+            -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw "Second installer run exited with $LASTEXITCODE" }
+          $secondRelease = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
+          if ($secondRelease -eq $firstRelease) { throw "Second install did not switch the current release" }
+          if (@(Get-ChildItem -Directory -LiteralPath (Join-Path $installRoot "releases")).Count -lt 2) {
+            throw "Second install did not retain versioned release directories"
+          }
+          $selectedRelease = Join-Path (Join-Path $installRoot "releases") $secondRelease
+          $installedPython = Join-Path $selectedRelease ".venv\Scripts\python.exe"
+          $pythonVersion = (& $installedPython -I -c 'import platform; print(platform.python_version())') -join ''
+          if ($LASTEXITCODE -ne 0 -or $pythonVersion.Trim() -ne "3.12.13") { throw "Unexpected Python: $pythonVersion" }
+          $liteLLMVersion = (& $installedPython -I -c 'from importlib.metadata import version; print(version("litellm"))') -join ''
+          if ($LASTEXITCODE -ne 0 -or $liteLLMVersion.Trim() -ne "1.98.0") { throw "Unexpected LiteLLM: $liteLLMVersion" }
+          $privateUv = Join-Path $installRoot "tools\uv-0.12.2\uv.exe"
+          $uvVersion = (& $privateUv --version) -join ''
+          if ($LASTEXITCODE -ne 0 -or -not $uvVersion.StartsWith("uv 0.12.2")) { throw "Unexpected uv: $uvVersion" }
+
+          $wrapper = Join-Path $installRoot "ica-router.ps1"
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper doctor
+          if ($LASTEXITCODE -ne 0) { throw "doctor exited with $LASTEXITCODE" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper status
+          if ($LASTEXITCODE -ne 0) { throw "status exited with $LASTEXITCODE" }
+
+          $state = Join-Path $installRoot "state"
+          $managedRunPath = Join-Path $state "run.json"
+          $runTemplate = Get-Content -Raw -LiteralPath $managedRunPath | ConvertFrom-Json
+          $runAcl = Get-Acl -LiteralPath $managedRunPath
+          $clientConfig = Get-Content -Raw (Join-Path $state "client-models.generated.json") | ConvertFrom-Json
+          $providerCount = @($clientConfig.providers.PSObject.Properties).Count
+          $modelCount = 0
+          foreach ($provider in $clientConfig.providers.PSObject.Properties.Value) {
+            $modelCount += @($provider.models).Count
+          }
+          if ($providerCount -ne 6) { throw "Expected 6 client providers, got $providerCount" }
+          if ($modelCount -ne 25) { throw "Expected 25 model aliases, got $modelCount" }
+
+          $liteConfig = Get-Content -Raw (Join-Path $state "config.yaml") | ConvertFrom-Json
+          if (@($liteConfig.model_list).Count -ne 50) {
+            throw "Expected 50 deployments with two dummy keys per pool"
+          }
+
+          $mergedClient = Get-Content -Raw -LiteralPath $clientPath | ConvertFrom-Json
+          if ($null -eq $mergedClient.providers."keep-ci-dummy") {
+            throw "Installer removed an unrelated client provider"
+          }
+          if (@($mergedClient.providers.PSObject.Properties).Count -ne 7) {
+            throw "Merged client should contain one unrelated and six router providers"
+          }
+          $clientBackups = @(Get-ChildItem -File -LiteralPath $clientAgentDir | Where-Object { $_.Name -like "models.json.backup-*" })
+          if ($clientBackups.Count -lt 1) { throw "Client merge did not create a backup" }
+
+          function Assert-CurrentUserOnlyAcl([string]$LiteralPath, [bool]$RequireProtected) {
+            $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $acl = Get-Acl -LiteralPath $LiteralPath
+            if ($RequireProtected -and -not $acl.AreAccessRulesProtected) { throw "Private ACL still inherits: $LiteralPath" }
+            $ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            if ($ownerSid -ne $currentSid) { throw "Private ACL owner is not current user: $LiteralPath ($ownerSid)" }
+            $allowed = @($acl.Access | Where-Object { $_.AccessControlType -eq "Allow" })
+            if ($allowed.Count -eq 0) { throw "No allow ACE on private path: $LiteralPath" }
+            foreach ($entry in $allowed) {
+              $entrySid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+              if ($entrySid -ne $currentSid) { throw "Unexpected allow ACE on private path: $LiteralPath ($entrySid)" }
+            }
+          }
+          $aclPaths = @(
+            $installRoot,
+            (Join-Path $installRoot "releases"),
+            $selectedRelease,
+            (Join-Path $selectedRelease "app"),
+            (Join-Path $selectedRelease ".venv"),
+            (Join-Path $installRoot "tools\uv-0.12.2"),
+            (Join-Path $installRoot "cache"),
+            $state,
+            $wrapper,
+            $currentPointer,
+            $clientPath
+          )
+          $aclPaths += @(Get-ChildItem -Force -LiteralPath $state | ForEach-Object { $_.FullName })
+          $aclPaths += @($clientBackups | ForEach-Object { $_.FullName })
+          foreach ($privatePath in $aclPaths) { Assert-CurrentUserOnlyAcl $privatePath $true }
+          $nestedStatePaths = @(
+            Get-ChildItem -Force -Recurse -LiteralPath $state |
+              Where-Object { $_.DirectoryName -ne $state -and $_.Parent.FullName -ne $state } |
+              ForEach-Object { $_.FullName }
+          )
+          foreach ($privatePath in $nestedStatePaths) { Assert-CurrentUserOnlyAcl $privatePath $false }
+
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper stop
+          if ($LASTEXITCODE -ne 0) { throw "stop exited with $LASTEXITCODE" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper status
+          if ($LASTEXITCODE -ne 1) { throw "Stopped status should exit 1, got $LASTEXITCODE" }
+
+          # A live but unrelated PID must be reported as stale and never signalled.
+          $runTemplate.pid = $PID
+          $runTemplate.startToken = "ci-intentionally-wrong-start-token"
+          $runPath = Join-Path $state "run.json"
+          $runTemplate | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $runPath -Encoding UTF8
+          Set-Acl -LiteralPath $runPath -AclObject $runAcl
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper status
+          if ($LASTEXITCODE -ne 3) { throw "Stale identity status should exit 3, got $LASTEXITCODE" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper stop
+          if ($LASTEXITCODE -ne 2) { throw "Identity-mismatch stop should exit 2, got $LASTEXITCODE" }
+          if ($null -eq (Get-Process -Id $PID -ErrorAction SilentlyContinue)) {
+            throw "Identity-mismatch stop signalled the unrelated CI process"
+          }
+          Remove-Item -LiteralPath $runPath -Force
+
+          # An active install-wide file lock must reject a concurrent installer without switching releases.
+          $pointerBeforeLockTest = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
+          $installLockPath = Join-Path $installRoot "install.lock"
+          $installLock = [System.IO.File]::Open(
+            $installLockPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+          )
+          try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
+              -InstallRoot $installRoot `
+              -SourceDirectory $sourceDirectory `
+              -KeyRotatorPath $rotatorPath `
+              -NonInteractive *> $null
+            $lockedInstallExit = $LASTEXITCODE
+          } finally {
+            $installLock.Dispose()
+          }
+          if ($lockedInstallExit -eq 0) { throw "Concurrent installer unexpectedly succeeded" }
+          if ((Get-Content -Raw -LiteralPath $currentPointer).Trim() -ne $pointerBeforeLockTest) {
+            throw "Rejected concurrent installer changed the current release"
+          }
+
+      - name: Stop and remove ephemeral installation
+        if: always()
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router ci [path] $ tick`'
+          $wrapper = Join-Path $installRoot "ica-router.ps1"
+          if (Test-Path $wrapper) {
+            try {
+              & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper stop
+            } catch {
+              Write-Warning $_
+            }
+          }
+          Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'key rotator [ci] $.json') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $HOME ".pi") -Recurse -Force -ErrorAction SilentlyContinue
