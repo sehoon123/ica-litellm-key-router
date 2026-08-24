@@ -604,7 +604,7 @@ jobs:
           $installedPython = Join-Path $selectedRelease ".venv\Scripts\python.exe"
           $pythonVersion = (& $installedPython -I -c 'import platform; print(platform.python_version())') -join ''
           if ($LASTEXITCODE -ne 0 -or $pythonVersion.Trim() -ne "3.12.13") { throw "Unexpected Python: $pythonVersion" }
-          $liteLLMVersion = (& $installedPython -I -c 'from importlib.metadata import version; print(version("litellm"))') -join ''
+          $liteLLMVersion = (& $installedPython -I -c 'from importlib.metadata import version; import sys; print(version(sys.argv[1]))' litellm) -join ''
           if ($LASTEXITCODE -ne 0 -or $liteLLMVersion.Trim() -ne "1.98.0") { throw "Unexpected LiteLLM: $liteLLMVersion" }
           $privateUv = Join-Path $installRoot "tools\uv-0.12.2\uv.exe"
           $uvVersion = (& $privateUv --version) -join ''

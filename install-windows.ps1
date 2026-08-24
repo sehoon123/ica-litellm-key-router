@@ -478,13 +478,13 @@ try {
         }
         $Python = Join-Path $VenvDir 'Scripts\python.exe'
         Invoke-Uv @('pip','check','--python',$Python)
-        $InstalledVersion = (& $Python -I -c 'from importlib.metadata import version; print(version("litellm"))') -join ''
+        $InstalledVersion = (& $Python -I -c 'from importlib.metadata import version; import sys; print(version(sys.argv[1]))' litellm) -join ''
         if ($LASTEXITCODE -ne 0 -or $InstalledVersion.Trim() -ne $LiteLLMVersion) { throw "LiteLLM version mismatch: $InstalledVersion" }
         Write-Utf8File (Join-Path $ReleaseDir '.complete') ($SourceRef + "`n")
         Set-PrivateAcl $ReleaseDir; Set-PrivateAcl $AppDir; Set-PrivateAcl $VenvDir
     } else {
         $Python = Join-Path $VenvDir 'Scripts\python.exe'
-        $InstalledVersion = (& $Python -I -c 'from importlib.metadata import version; print(version("litellm"))') -join ''
+        $InstalledVersion = (& $Python -I -c 'from importlib.metadata import version; import sys; print(version(sys.argv[1]))' litellm) -join ''
         if ($LASTEXITCODE -ne 0 -or $InstalledVersion.Trim() -ne $LiteLLMVersion) { throw "existing release has wrong LiteLLM version" }
     }
 
