@@ -5,14 +5,14 @@
 [![CI](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml/badge.svg)](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A local, authenticated [LiteLLM](https://github.com/BerriAI/litellm) proxy that spreads IBM ICA requests across credential pools. It keeps the native OpenAI Responses, Anthropic Messages, and Gemini `generateContent` interfaces used by Pi and prime-agent.
+A local, authenticated [LiteLLM](https://github.com/BerriAI/litellm) proxy that spreads IBM ICA Services Essentials requests across authorized API keys. It keeps the native OpenAI Responses, Anthropic Messages, and Gemini `generateContent` interfaces used by Pi and prime-agent.
 
 The router does not issue credentials. Use only credentials and IBM services that you are authorized to use.
 
 ## What it does
 
 - Runs exactly one LiteLLM worker on `127.0.0.1:4000` by default.
-- Exposes six local client providers and 25 provider-qualified model aliases.
+- Exposes three local client providers and 11 provider-qualified model aliases.
 - Creates one LiteLLM deployment per alias and credential in that alias's pool.
 - Selects a healthy deployment randomly with `simple-shuffle`; this is not round-robin.
 - Cools down a deployment immediately after configured failure classes and retries eligible pre-output failures.
@@ -33,8 +33,7 @@ LiteLLM 1.98.0, one worker, 127.0.0.1:4000
         | alias -> random healthy credential deployment
         | provider keys supplied through process environment
         v
-IBM ICA HTTPS gateways
-  - ibm-ica-nextgen pool
+IBM ICA Services Essentials HTTPS gateway
   - ica-services-essentials pool
 ```
 
@@ -48,10 +47,10 @@ The loopback listener uses HTTP because it does not leave the host. Bootstrap an
 
 | Pool | Catalog providers | HTTPS bases from `catalog.json` |
 |---|---|---|
-| `ibm-ica-nextgen` | `ibm-ica`, `ibm-ica-claude`, `ibm-ica-gemini` | `https://api.nextgen-beta.ica.ibm.com/ica/v1`, `https://api.nextgen-beta.ica.ibm.com/ica`, `https://api.nextgen-beta.ica.ibm.com/ica/v1beta` |
 | `ica-services-essentials` | `ica-se-openai`, `ica-se-claude`, `ica-se-gemini` | `https://api.servicesessentials.ibm.com/v1`, `https://api.servicesessentials.ibm.com`, `https://api.servicesessentials.ibm.com/v1beta` |
 
-The OpenAI entries use LiteLLM's Azure Responses transformer with API version `v1`. Provider-qualified aliases keep the same upstream model ID in two gateways from becoming one LiteLLM model group. Treat changes to `catalog.json` as changes to credential destinations.
+The OpenAI entries use LiteLLM's Azure Responses transformer with API version `v1`. Provider-qualified aliases keep the OpenAI, Anthropic, and Gemini surfaces as distinct LiteLLM model groups. Treat changes to `catalog.json` as changes to credential destinations. `ibm-ica-nextgen` is deprecated and is not generated or contacted.
+The original IBM Services Essentials Responses endpoint is `https://api.servicesessentials.ibm.com/v1/responses`. Generated LiteLLM `api_base` values add `?_litellm_route=/openai/responses` only as a LiteLLM `1.98.0` URL-builder compatibility marker so its Azure transformer does not append a second `/openai/responses`. It is not an IBM API parameter; omit it from direct IBM calls.
 
 ### Routing and retry behavior
 
@@ -59,7 +58,7 @@ The generated router settings use:
 
 - `routing_strategy: simple-shuffle` with equal weights;
 - `enable_weighted_failover: false`;
-- router `num_retries: 2` by default (`--max-fallbacks` / `maxFallbacks` in private runtime state);
+- router `num_retries: 2` by default, capped at the number of alternate keys (`key count - 1`), with `--max-fallbacks` / `maxFallbacks` as the configured ceiling;
 - per-deployment/provider SDK `max_retries: 0`;
 - zero retries for LiteLLM `BadRequestError` and `ContentPolicyViolationError`;
 - up to two router retries for authentication, timeout, and rate-limit errors; the same global count necessarily covers intended 5xx retries and stock LiteLLM 1.98.0's other standard retryable statuses/exceptions;
@@ -67,7 +66,7 @@ The generated router settings use:
 - a 60-second cooldown by default; and
 - pre-call checks for Responses deployments and encrypted-content affinity.
 
-**`simple-shuffle` is random, not round-robin.** It does not promise a stable key order, equal short-term traffic, or that every key will be tried. With the default `maxFallbacks: 2`, an eligible request can make the initial attempt plus at most two router retries. Retries remain within the deployments for the same provider-qualified alias; there is no cross-model or cross-provider fallback map.
+**`simple-shuffle` is random, not round-robin.** It does not promise a stable key order, equal short-term traffic, or that every key will be tried. With the default `maxFallbacks: 2`, an eligible request can make the initial attempt plus at most two router retries, but never more retries than there are alternate keys. One configured key therefore produces zero router retries. Retries remain within the deployments for the same provider-qualified alias; there is no cross-model or cross-provider fallback map.
 
 Explicit policy entries block retries for bad requests and content-policy failures. Stock LiteLLM `1.98.0` has no `InternalServerErrorRetries` policy key, so the global count must remain broader to cover intended 5xx retry behavior; it can also follow LiteLLM's other standard retryable-status decisions. This is not a strict four-class retry allowlist.
 
@@ -75,31 +74,27 @@ A pre-output failure can be ambiguous. IBM may have accepted, executed, or bille
 
 The router deliberately uses a **single worker**. Its local process identity, lock, cooldown state, and controller are not a multi-worker or distributed design.
 
-## Client providers and all 25 aliases
+## Client providers and all 11 aliases
 
-Bootstrap generates these six provider IDs. Pi and prime-agent show their models under names ending in `(key router)`.
+Bootstrap generates these three provider IDs. Pi and prime-agent show their models under names ending in `(key router)`.
 
 | Local client provider | Native API | Model aliases |
 |---|---|---|
-| `ibm-ica-router` | OpenAI Responses | `ibm-ica--gpt-5.5-gus`<br>`ibm-ica--gpt-5.6-luna-dzus`<br>`ibm-ica--gpt-5.6-terra-dzus` |
-| `ibm-ica-claude-router` | Anthropic Messages | `ibm-ica-claude--claude-sonnet-4-5`<br>`ibm-ica-claude--claude-sonnet-4-6`<br>`ibm-ica-claude--claude-sonnet-5`<br>`ibm-ica-claude--claude-opus-4-6`<br>`ibm-ica-claude--claude-opus-4-7`<br>`ibm-ica-claude--claude-opus-4-8`<br>`ibm-ica-claude--claude-opus-5`<br>`ibm-ica-claude--claude-haiku-4-5` |
-| `ibm-ica-gemini-router` | Gemini `generateContent` | `ibm-ica-gemini--gemini-3.1-pro-preview`<br>`ibm-ica-gemini--gemini-3.6-flash`<br>`ibm-ica-gemini--gemini-3.5-flash` |
 | `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus` |
 | `ica-se-claude-router` | Anthropic Messages | `ica-se-claude--claude-sonnet-4-6`<br>`ica-se-claude--claude-sonnet-5`<br>`ica-se-claude--claude-opus-4-6`<br>`ica-se-claude--claude-opus-4-8`<br>`ica-se-claude--claude-opus-5`<br>`ica-se-claude--claude-haiku-4-5` |
 | `ica-se-gemini-router` | Gemini `generateContent` | `ica-se-gemini--gemini-3.7-flash`<br>`ica-se-gemini--gemini-3.6-flash`<br>`ica-se-gemini--gemini-3.5-flash` |
 
-There are 14 aliases in `ibm-ica-nextgen` and 11 in `ica-services-essentials`. Deployment count is:
+Deployment count is:
 
 ```text
-(14 × number of ibm-ica-nextgen keys)
-+ (11 × number of ica-services-essentials keys)
+11 × number of ica-services-essentials keys
 ```
 
-The required minimum of two keys in each pool produces 50 deployments.
+The required minimum of one key produces 11 deployments.
 
 ## Requirements
 
-- Two or more distinct, authorized keys in each catalog pool.
+- One or more distinct, authorized keys in each catalog pool.
 - Direct outbound HTTPS to the IBM gateways at runtime.
 - Installation access to GitHub, `astral.sh`, PyPI, and the source used by `uv` for managed Python.
 - A free loopback port, `4000` by default.
@@ -188,16 +183,42 @@ Or run a separately verified standalone installer. With no complete source tree 
 ICA_ROUTER_REF=v0.1.0 bash ./install-linux.sh
 ```
 
+On the first run, the installer asks for one key at a time for each catalog pool. Input is hidden. Press Enter on an empty key prompt after the last key in that pool. At least one key is required in each pool. It then generates all deployments and starts LiteLLM.
+
+On later runs, if the saved secrets, generated state, and selected release pass `doctor`, the installer skips downloading and reinstalling dependencies. It only ensures that LiteLLM is running. Use `--force-install` when an actual reinstall or update is intended, and `--replace-keys` to replace all saved pool keys. `--replace-keys` preserves the local proxy master key, so existing client files remain valid.
+When upgrading legacy state, bootstrap preserves `ica-services-essentials`, removes the deprecated `ibm-ica-nextgen` pool from active secrets, and writes a private timestamped backup first. An explicit client merge removes the three deprecated NextGen router provider IDs. The protected secrets backup can still contain retired NextGen values; delete that backup after verification if it is no longer required.
+
+Client configuration is opt-in and may be done during installation or later:
+
+```bash
+# Do not touch models.json (default).
+bash ./install-linux.sh
+
+# Create or merge Pi's file.
+bash ./install-linux.sh --pi-models
+
+# Create or merge both supported client files.
+bash ./install-linux.sh --pi-models --prime-models
+
+# Create or merge an explicit path; repeat the option if needed.
+bash ./install-linux.sh --models-json /private/path/models.json
+
+# The same operation remains available separately after installation.
+ica-router stop
+ica-router configure-clients --client "$HOME/.pi/agent/models.json"
+ica-router start
+```
+
 The installer:
 
 1. takes an install-wide lock;
 2. resolves previously verified local source or a verified exact-tag ZIP;
 3. installs the private pinned toolchain and frozen environment into a new versioned release;
-4. snapshots private generated state and the two auto-detected client files;
+4. snapshots private generated state and any explicitly requested client files;
 5. safely stops an existing managed router;
 6. atomically switches `current` to the new release;
-7. preserves valid existing secrets, or imports key pools/prompts on first install;
-8. writes generated state and merges the six providers into existing client files;
+7. preserves valid existing secrets, or on first install reads keys until an empty value ends each pool;
+8. writes generated state and, only when requested, creates or merges client files;
 9. runs `doctor`, starts one worker, and creates a best-effort `~/.local/bin/ica-router` symlink.
 
 Default layout:
@@ -250,7 +271,21 @@ Default layout:
 | Private `uv` and cache | `<install-root>\tools\uv-0.12.2`, `<install-root>\cache\uv` |
 | Wrapper | `<install-root>\ica-router.ps1` |
 
-The Windows flow performs the same lock, stage, snapshot, stop, atomic pointer switch, bootstrap, `doctor`, and start sequence. It does not add the wrapper to `PATH`. It fails closed if it cannot remove inherited access and set/verify protected current-user-only allow ACLs on installer/control-plane private paths. Runtime cache/temp descendants inherit current-user-only access from protected parents. Client files and their backups are also restricted, but the router does not rewrite the ACL of an arbitrary client parent directory.
+The Windows flow performs the same first-run prompt-until-empty, generated configuration, start, and later start-only fast path. It does not add the wrapper to `PATH`. It fails closed if it cannot remove inherited access and set/verify protected current-user-only allow ACLs on installer/control-plane private paths. Runtime cache/temp descendants inherit current-user-only access from protected parents. Client files and their backups are also restricted, but the router does not rewrite the ACL of an arbitrary client parent directory.
+
+Client configuration is also opt-in:
+
+```powershell
+# Default: do not touch models.json.
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
+
+# Create or merge Pi's file.
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -PiModels
+
+# Other choices: -PrimeModels or -ModelsJson 'D:\Private\models.json'.
+```
+
+Use `-ReplaceKeys` to enter all Services Essentials keys again and `-ForceInstall` for an actual reinstall/update.
 
 Overrides:
 
@@ -273,12 +308,6 @@ Environment equivalents are `ICA_ROUTER_HOME`, `ICA_ROUTER_SOURCE_DIR`, `ICA_ROU
   "schemaVersion": 1,
   "masterKey": "REPLACE_ME_WITH_A_RANDOM_SK_MASTER_KEY",
   "pools": {
-    "ibm-ica-nextgen": {
-      "keys": [
-        { "id": "key-1", "value": "REPLACE_ME_NEXTGEN_KEY_1" },
-        { "id": "key-2", "value": "REPLACE_ME_NEXTGEN_KEY_2" }
-      ]
-    },
     "ica-services-essentials": {
       "keys": [
         { "id": "key-1", "value": "REPLACE_ME_SERVICES_KEY_1" },
@@ -293,8 +322,8 @@ Do not copy placeholders into private state. Interactive bootstrap creates a ran
 
 - `schemaVersion` exactly `1`;
 - a `masterKey` beginning with `sk-`, 24–1024 UTF-8 bytes, with no NUL/newline or placeholder marker;
-- exactly the two pool IDs above;
-- 2–256 keys in each pool;
+- exactly the `ica-services-essentials` pool ID;
+- 1–256 keys in the pool;
 - a unique key `id` in each pool matching a conservative identifier format;
 - each provider value non-empty, at most 4096 UTF-8 bytes, with no NUL/newline or placeholder marker;
 - no duplicate provider value within one pool;
@@ -305,13 +334,6 @@ Auto-import checks `~/.pi/agent/key-rotator.json` and `~/.prime/agent/key-rotato
 ```json
 {
   "pools": [
-    {
-      "poolId": "ibm-ica-nextgen",
-      "keys": [
-        { "id": "key-1", "value": "REPLACE_ME_NEXTGEN_KEY_1" },
-        { "id": "key-2", "value": "REPLACE_ME_NEXTGEN_KEY_2" }
-      ]
-    },
     {
       "poolId": "ica-services-essentials",
       "keys": [
@@ -325,7 +347,7 @@ Auto-import checks `~/.pi/agent/key-rotator.json` and `~/.prime/agent/key-rotato
 
 On Unix, installer-owned private directories use mode `0700` and private files use `0600`. Windows uses protected current-user-only ACLs and fails if restriction or verification fails. Raw upstream keys are stored in plaintext `state/secrets.json` and loaded into the LiteLLM process environment. `config.yaml` contains environment references rather than raw keys.
 
-The local master key is not an IBM key. It grants authenticated access to every local router route and is copied into `client-models.generated.json` and each configured Pi/prime-agent `models.json`. A timestamped backup contains the entire previous client file, including any unrelated provider secrets. Treat state, client files, process environment, logs, memory, and backups as sensitive. Do not merge while another process writes the same client file.
+The local master key is not an IBM key. It grants authenticated access to every local router route and is copied into `client-models.generated.json` and each configured Pi/prime-agent `models.json`. Replacing upstream API keys preserves this local key by default. The lower-level `bootstrap --replace-secrets --rotate-master-key` option rotates it explicitly; after using that option, regenerate every configured client file before use. A timestamped backup contains the entire previous client file, including any unrelated provider secrets. Treat state, client files, process environment, logs, memory, and backups as sensitive. Do not merge while another process writes the same client file.
 
 ## Native API endpoints
 
@@ -342,7 +364,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/responses \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ibm-ica--gpt-5.5-gus",
+    "model": "ica-se-openai--gpt-5.6-luna-dzus",
     "input": "Reply with OK.",
     "stream": false
   }'
@@ -359,7 +381,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/messages \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ibm-ica-claude--claude-sonnet-4-6",
+    "model": "ica-se-claude--claude-sonnet-4-6",
     "max_tokens": 64,
     "messages": [{"role": "user", "content": "Reply with OK."}]
   }'
@@ -372,7 +394,7 @@ Endpoint: `POST /v1/messages`
 
 ```bash
 curl --fail-with-body \
-  'http://127.0.0.1:4000/v1beta/models/ibm-ica-gemini--gemini-3.1-pro-preview:generateContent' \
+  'http://127.0.0.1:4000/v1beta/models/ica-se-gemini--gemini-3.7-flash:generateContent' \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -433,7 +455,7 @@ ica-router configure-clients --client /private/path/models.json
 ica-router bootstrap --port 4100 --client auto
 ```
 
-`bootstrap` creates or preserves secrets and rewrites a complete generated state. `generate` accepts only a currently consistent generation. `configure-clients` merges the six router-owned providers. Auto mode changes only existing `~/.pi/agent/models.json` and `~/.prime/agent/models.json` files.
+`bootstrap` creates or preserves secrets and rewrites a complete generated state. `generate` accepts only a currently consistent generation. `configure-clients` merges the three active router-owned providers. Auto mode changes only existing `~/.pi/agent/models.json` and `~/.prime/agent/models.json` files.
 
 Persistent state includes `secrets.json`, `config.yaml` (JSON valid as YAML), `client-models.generated.json`, `runtime.json`, and `generation.json`. The generation marker binds normalized digests of catalog, secrets, generated config, generated clients, and runtime. It is written last so an interrupted multi-file generation fails closed. Lifecycle files are `command.lock`, transient `run.json`, and `router.log`; logs above 10 MiB rotate to `router.log.1`. Private `process-home`, `process-cache`, and `process-tmp` directories isolate LiteLLM from the caller's home but can retain dependency cache or temporary data, so include them in state protection and retention handling.
 
@@ -492,7 +514,7 @@ Private directories should be `0700` and files `0600`. On Windows, do not bypass
 
 ### Placeholder, pool, or duplicate-key error
 
-The example is not valid secret material. Both exact pool IDs and at least two distinct keys per pool are required. Stop the router, correct/import the private source, and run `bootstrap`; use `--replace-secrets` only when you intend to replace and back up the existing secret document.
+The example is not valid secret material. The exact Services Essentials pool ID and at least one authorized key are required. Stop the router, correct/import the private source, and run `bootstrap`; use `--replace-secrets` only when you intend to replace and back up the existing secret document.
 
 ### Router provider is missing in Pi/prime-agent
 
@@ -502,7 +524,7 @@ Auto mode changes existing client files only. Supply an exact path after stoppin
 ica-router configure-clients --client /private/path/models.json
 ```
 
-The merge retains unrelated provider IDs, replaces the six router-owned IDs, and creates a whole-file timestamped backup only when content changes. Restart the client afterward.
+The merge retains unrelated provider IDs, replaces the three active router-owned IDs and removes the three deprecated NextGen router IDs, and creates a whole-file timestamped backup only when content changes. Restart the client afterward.
 
 ### Local authentication fails
 
@@ -520,7 +542,7 @@ The client may hold an older local master key. Stop the router, rerun `configure
 4. Run the new platform installer.
 5. Confirm `doctor` and `status`, then restart Pi/prime-agent.
 
-An installer serializes updates, stages a versioned release, snapshots generated state and the two auto-detected client files, stops the old managed process, atomically switches `current`, bootstraps, checks, and starts. Valid existing port, `maxFallbacks`, and cooldown runtime settings are preserved unless an explicit bootstrap flag changes them. On a handled failure after stop/switch, the installer attempts to restore the previous pointer, state, and auto client files and restart the old release. Old versioned releases are retained.
+An installer serializes updates, stages a versioned release, snapshots generated state and explicitly requested client files, stops the old managed process, atomically switches `current`, bootstraps, checks, and starts. Valid existing port, `maxFallbacks`, and cooldown runtime settings are preserved unless an explicit bootstrap flag changes them. On a handled failure after stop/switch, the installer attempts to restore the previous pointer, state, and requested client files and restart the old release. Old versioned releases are retained.
 
 Rollback is **best effort**, not a crash-proof transaction. Power loss, forced termination, storage failure, ACL failure, or custom client paths can leave partial work or require manual recovery. The local master key and unrelated client secrets exist in rollback snapshots and timestamped backups. Keep an independent protected backup until verification, and remove obsolete releases/backups deliberately.
 
@@ -529,7 +551,7 @@ Rollback is **best effort**, not a crash-proof transaction. Power loss, forced t
 There is no automated uninstaller.
 
 1. Stop the router.
-2. Remove the six `*-router` entries listed above from every configured client file.
+2. Remove the three active `*-router` entries listed above and any deprecated `ibm-ica*-router` entries from every configured client file.
 3. Review and remove timestamped client backups if retention is not required.
 4. Remove the wrapper/symlink and the confirmed install root.
 5. Rotate IBM credentials if the host, process environment, state, logs, or backups may have been exposed.

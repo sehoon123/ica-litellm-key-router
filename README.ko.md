@@ -5,14 +5,14 @@
 [![CI](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml/badge.svg)](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-IBM ICA 요청을 여러 credential에 분산하는 로컬 인증 [LiteLLM](https://github.com/BerriAI/litellm) 프록시입니다. Pi와 prime-agent가 사용하는 OpenAI Responses, Anthropic Messages, Gemini `generateContent` 네이티브 인터페이스를 유지합니다.
+IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인증 [LiteLLM](https://github.com/BerriAI/litellm) 프록시입니다. Pi와 prime-agent가 사용하는 OpenAI Responses, Anthropic Messages, Gemini `generateContent` 네이티브 인터페이스를 유지합니다.
 
 이 라우터는 credential을 발급하지 않습니다. 사용 권한이 있는 credential과 IBM 서비스만 사용하십시오.
 
 ## 주요 기능
 
 - 기본적으로 정확히 한 개의 LiteLLM worker를 `127.0.0.1:4000`에서 실행합니다.
-- 로컬 client provider 6개와 provider-qualified model alias 25개를 제공합니다.
+- 로컬 client provider 3개와 provider-qualified model alias 11개를 제공합니다.
 - alias와 해당 pool의 credential 조합마다 LiteLLM deployment 하나를 만듭니다.
 - `simple-shuffle`로 정상 deployment를 무작위 선택합니다. round-robin이 아닙니다.
 - 지정된 오류가 발생하면 deployment를 즉시 cooldown하고, 출력 전 재시도가 가능한 오류를 재시도합니다.
@@ -33,8 +33,7 @@ LiteLLM 1.98.0, worker 1개, 127.0.0.1:4000
         | alias -> 무작위 정상 credential deployment
         | process environment로 provider key 전달
         v
-IBM ICA HTTPS gateway
-  - ibm-ica-nextgen pool
+IBM ICA Services Essentials HTTPS gateway
   - ica-services-essentials pool
 ```
 
@@ -48,10 +47,10 @@ Loopback listener는 호스트 밖으로 나가지 않으므로 HTTP를 사용�
 
 | Pool | Catalog provider | `catalog.json`의 HTTPS base |
 |---|---|---|
-| `ibm-ica-nextgen` | `ibm-ica`, `ibm-ica-claude`, `ibm-ica-gemini` | `https://api.nextgen-beta.ica.ibm.com/ica/v1`, `https://api.nextgen-beta.ica.ibm.com/ica`, `https://api.nextgen-beta.ica.ibm.com/ica/v1beta` |
 | `ica-services-essentials` | `ica-se-openai`, `ica-se-claude`, `ica-se-gemini` | `https://api.servicesessentials.ibm.com/v1`, `https://api.servicesessentials.ibm.com`, `https://api.servicesessentials.ibm.com/v1beta` |
 
-OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사용합니다. Provider-qualified alias는 두 gateway에 같은 upstream model ID가 있어도 하나의 LiteLLM model group으로 합쳐지지 않게 합니다. `catalog.json` 변경은 credential 전송 대상 변경으로 간주하십시오.
+OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사용합니다. Provider-qualified alias는 OpenAI, Anthropic, Gemini 표면을 서로 다른 LiteLLM model group으로 유지합니다. `catalog.json` 변경은 credential 전송 대상 변경으로 간주하십시오. `ibm-ica-nextgen`은 deprecated되었으며 생성하거나 호출하지 않습니다.
+원래 IBM Services Essentials Responses endpoint는 `https://api.servicesessentials.ibm.com/v1/responses`입니다. 생성된 LiteLLM `api_base`의 `?_litellm_route=/openai/responses`는 Azure transformer가 `/openai/responses`를 한 번 더 붙이지 않게 하는 LiteLLM `1.98.0` 전용 URL-builder compatibility marker입니다. IBM API parameter가 아니므로 IBM endpoint를 직접 호출할 때는 넣지 마십시오.
 
 ### Routing과 재시도 동작
 
@@ -59,7 +58,7 @@ OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사�
 
 - 동일한 weight의 `routing_strategy: simple-shuffle`;
 - `enable_weighted_failover: false`;
-- 기본 router `num_retries: 2` (`--max-fallbacks` / private runtime state의 `maxFallbacks`);
+- 기본 router `num_retries: 2`. 단, 대체 key 수(`key 수 - 1`) 이하로 제한되며 `--max-fallbacks` / private runtime state의 `maxFallbacks`는 설정 상한값입니다;
 - deployment/provider SDK별 `max_retries: 0`;
 - LiteLLM `BadRequestError`와 `ContentPolicyViolationError` 재시도 0;
 - authentication, timeout, rate-limit 오류에 router 재시도 최대 2회. 같은 global 횟수는 의도된 5xx 재시도와 stock LiteLLM 1.98.0이 표준적으로 재시도 가능하다고 판단하는 다른 status/exception에도 적용됨;
@@ -67,7 +66,7 @@ OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사�
 - 기본 cooldown 60초;
 - Responses deployment 및 encrypted-content affinity용 pre-call check.
 
-**`simple-shuffle`은 무작위 선택이며 round-robin이 아닙니다.** 안정적인 key 순서, 단기간의 동일한 트래픽 분배, 모든 key 시도를 보장하지 않습니다. 기본 `maxFallbacks: 2`에서는 재시도 가능한 요청이 최초 시도 후 router 재시도를 최대 두 번 할 수 있습니다. 재시도는 같은 provider-qualified alias의 deployment 안에서만 수행됩니다. Cross-model 또는 cross-provider fallback map은 없습니다.
+**`simple-shuffle`은 무작위 선택이며 round-robin이 아닙니다.** 안정적인 key 순서, 단기간의 동일한 트래픽 분배, 모든 key 시도를 보장하지 않습니다. 기본 `maxFallbacks: 2`에서는 재시도 가능한 요청이 최초 시도 후 router 재시도를 최대 두 번 할 수 있지만 대체 key 수보다 많이 재시도하지 않습니다. 따라서 설정된 key가 한 개이면 router 재시도는 0회입니다. 재시도는 같은 provider-qualified alias의 deployment 안에서만 수행됩니다. Cross-model 또는 cross-provider fallback map은 없습니다.
 
 명시적 policy 항목은 bad request와 content-policy 오류의 재시도를 막습니다. Stock LiteLLM `1.98.0`에는 `InternalServerErrorRetries` policy key가 없으므로 의도된 5xx 재시도를 위해 global 횟수가 더 넓게 적용되어야 합니다. LiteLLM의 다른 표준 retryable-status 판단도 따를 수 있습니다. 엄격한 네 가지 오류 class allowlist가 아닙니다.
 
@@ -75,31 +74,27 @@ OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사�
 
 이 라우터는 의도적으로 **single worker**만 사용합니다. 로컬 process identity, lock, cooldown state, controller는 multi-worker 또는 distributed 설계가 아닙니다.
 
-## Client provider 6개와 alias 25개 전체 목록
+## Client provider 3개와 alias 11개 전체 목록
 
 Bootstrap이 다음 provider ID를 만듭니다. Pi와 prime-agent에서는 model 이름 끝에 `(key router)`가 표시됩니다.
 
 | 로컬 client provider | 네이티브 API | Model alias |
 |---|---|---|
-| `ibm-ica-router` | OpenAI Responses | `ibm-ica--gpt-5.5-gus`<br>`ibm-ica--gpt-5.6-luna-dzus`<br>`ibm-ica--gpt-5.6-terra-dzus` |
-| `ibm-ica-claude-router` | Anthropic Messages | `ibm-ica-claude--claude-sonnet-4-5`<br>`ibm-ica-claude--claude-sonnet-4-6`<br>`ibm-ica-claude--claude-sonnet-5`<br>`ibm-ica-claude--claude-opus-4-6`<br>`ibm-ica-claude--claude-opus-4-7`<br>`ibm-ica-claude--claude-opus-4-8`<br>`ibm-ica-claude--claude-opus-5`<br>`ibm-ica-claude--claude-haiku-4-5` |
-| `ibm-ica-gemini-router` | Gemini `generateContent` | `ibm-ica-gemini--gemini-3.1-pro-preview`<br>`ibm-ica-gemini--gemini-3.6-flash`<br>`ibm-ica-gemini--gemini-3.5-flash` |
 | `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus` |
 | `ica-se-claude-router` | Anthropic Messages | `ica-se-claude--claude-sonnet-4-6`<br>`ica-se-claude--claude-sonnet-5`<br>`ica-se-claude--claude-opus-4-6`<br>`ica-se-claude--claude-opus-4-8`<br>`ica-se-claude--claude-opus-5`<br>`ica-se-claude--claude-haiku-4-5` |
 | `ica-se-gemini-router` | Gemini `generateContent` | `ica-se-gemini--gemini-3.7-flash`<br>`ica-se-gemini--gemini-3.6-flash`<br>`ica-se-gemini--gemini-3.5-flash` |
 
-`ibm-ica-nextgen`에는 alias 14개, `ica-services-essentials`에는 11개가 있습니다. Deployment 수는 다음과 같습니다.
+Deployment 수는 다음과 같습니다.
 
 ```text
-(14 × ibm-ica-nextgen key 수)
-+ (11 × ica-services-essentials key 수)
+11 × ica-services-essentials key 수
 ```
 
-각 pool에 최소 두 개의 key를 넣으면 deployment 50개가 생성됩니다.
+최소 한 개의 key를 넣으면 deployment 11개가 생성됩니다.
 
 ## 요구 사항
 
-- 각 catalog pool에 서로 다른, 사용 권한이 있는 key가 두 개 이상 있어야 합니다.
+- 각 catalog pool에 사용 권한이 있는 key가 한 개 이상 있어야 합니다.
 - Runtime에서 IBM gateway로 직접 outbound HTTPS 연결할 수 있어야 합니다.
 - 설치 중 GitHub, `astral.sh`, PyPI 및 `uv` managed Python source에 접근할 수 있어야 합니다.
 - 사용 가능한 loopback port가 있어야 합니다. 기본값은 `4000`입니다.
@@ -188,16 +183,42 @@ bash ./install-linux.sh
 ICA_ROUTER_REF=v0.1.0 bash ./install-linux.sh
 ```
 
+최초 실행에서는 각 catalog pool의 key를 한 개씩 안전하게 입력받습니다. 입력 내용은 화면에 표시되지 않습니다. 해당 pool의 마지막 key 다음 prompt에서 아무것도 입력하지 않고 Enter를 누르면 입력이 끝납니다. 각 pool에는 최소 한 개의 key가 필요합니다. 이후 모든 deployment를 생성하고 LiteLLM을 시작합니다.
+
+다시 실행했을 때 저장된 secrets, 생성 state, 선택 release가 `doctor`를 통과하면 dependency를 다시 받거나 설치하지 않습니다. LiteLLM이 실행 중인지 확인하고, 중지되어 있으면 시작하기만 합니다. 실제 재설치 또는 update가 필요하면 `--force-install`, 모든 key를 다시 입력하려면 `--replace-keys`를 사용합니다. `--replace-keys`는 로컬 proxy master key를 보존하므로 기존 client 파일의 인증이 유지됩니다.
+기존 state를 upgrade할 때 bootstrap은 `ica-services-essentials`를 보존하고 active secrets에서 deprecated `ibm-ica-nextgen` pool을 제거하기 전에 private timestamp backup을 만듭니다. 명시적인 client merge는 deprecated NextGen router provider ID 3개도 제거합니다. 보호된 secrets backup에는 폐기된 NextGen 값이 남을 수 있으므로 검증 후 필요 없으면 해당 backup을 삭제하십시오.
+
+Client 설정은 명시적인 선택 사항이며 설치 중 또는 설치 후 따로 만들 수 있습니다.
+
+```bash
+# models.json을 변경하지 않음(기본 동작)
+bash ./install-linux.sh
+
+# Pi models.json 생성 또는 병합
+bash ./install-linux.sh --pi-models
+
+# Pi와 prime-agent 파일 모두 생성 또는 병합
+bash ./install-linux.sh --pi-models --prime-models
+
+# 원하는 경로 생성 또는 병합. 여러 경로면 옵션을 반복함
+bash ./install-linux.sh --models-json /private/path/models.json
+
+# 설치 후 별도 실행도 가능
+ica-router stop
+ica-router configure-clients --client "$HOME/.pi/agent/models.json"
+ica-router start
+```
+
 Installer 동작:
 
 1. 설치 전체 범위 lock을 획득합니다.
 2. 미리 검증한 local source 또는 검증된 exact-tag ZIP을 선택합니다.
 3. 고정된 전용 toolchain과 frozen environment를 새 versioned release에 설치합니다.
-4. 생성된 private state와 자동 감지 client 파일 두 개를 snapshot합니다.
+4. 생성된 private state와 명시적으로 요청한 client 파일을 snapshot합니다.
 5. 기존 managed router를 안전하게 중지합니다.
 6. `current`를 새 release로 atomic 전환합니다.
-7. 유효한 기존 secrets를 보존합니다. 최초 설치에서는 key pool을 import하거나 안전하게 입력받습니다.
-8. 생성 state를 쓰고 기존 client 파일에 provider 6개를 병합합니다.
+7. 유효한 기존 secrets를 보존합니다. 최초 설치에서는 각 pool에서 빈 값을 입력할 때까지 key를 받습니다.
+8. 생성 state를 쓰고, 요청한 경우에만 client 파일을 생성하거나 병합합니다.
 9. `doctor` 실행 후 worker 한 개를 시작하고, best-effort `~/.local/bin/ica-router` symlink를 만듭니다.
 
 기본 layout:
@@ -250,7 +271,21 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 | 전용 `uv`와 cache | `<install-root>\tools\uv-0.12.2`, `<install-root>\cache\uv` |
 | Wrapper | `<install-root>\ica-router.ps1` |
 
-Windows도 lock, stage, snapshot, stop, atomic pointer 전환, bootstrap, `doctor`, start 순서로 실행합니다. Wrapper를 `PATH`에 추가하지 않습니다. Installer/control-plane private path의 inherited access를 제거하고 protected current-user-only allow ACL을 설정·검증할 수 없으면 fail-closed합니다. Runtime cache/temp 하위 항목은 protected parent에서 current-user-only access를 상속합니다. Client 파일과 backup도 제한하지만 임의 client parent directory의 ACL은 변경하지 않습니다.
+Windows도 최초 실행의 빈 값까지 key 입력, 설정 생성, 시작 및 이후 start-only fast path를 수행합니다. Wrapper를 `PATH`에 추가하지 않습니다. Installer/control-plane private path의 inherited access를 제거하고 protected current-user-only allow ACL을 설정·검증할 수 없으면 fail-closed합니다. Runtime cache/temp 하위 항목은 protected parent에서 current-user-only access를 상속합니다. Client 파일과 backup도 제한하지만 임의 client parent directory의 ACL은 변경하지 않습니다.
+
+Client 설정도 명시적인 선택 사항입니다.
+
+```powershell
+# 기본: models.json을 변경하지 않음
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
+
+# Pi 파일 생성 또는 병합
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -PiModels
+
+# 다른 선택: -PrimeModels 또는 -ModelsJson 'D:\Private\models.json'
+```
+
+모든 Services Essentials key를 다시 입력하려면 `-ReplaceKeys`, 실제 재설치/update에는 `-ForceInstall`을 사용합니다.
 
 Override 예:
 
@@ -273,12 +308,6 @@ Environment 대응값은 `ICA_ROUTER_HOME`, `ICA_ROUTER_SOURCE_DIR`, `ICA_ROUTER
   "schemaVersion": 1,
   "masterKey": "REPLACE_ME_WITH_A_RANDOM_SK_MASTER_KEY",
   "pools": {
-    "ibm-ica-nextgen": {
-      "keys": [
-        { "id": "key-1", "value": "REPLACE_ME_NEXTGEN_KEY_1" },
-        { "id": "key-2", "value": "REPLACE_ME_NEXTGEN_KEY_2" }
-      ]
-    },
     "ica-services-essentials": {
       "keys": [
         { "id": "key-1", "value": "REPLACE_ME_SERVICES_KEY_1" },
@@ -293,8 +322,8 @@ Placeholder를 private state에 복사하지 마십시오. Interactive bootstrap
 
 - `schemaVersion`은 정확히 `1`;
 - `masterKey`는 `sk-`로 시작하고 UTF-8 24–1024 byte이며 NUL/newline/placeholder marker가 없어야 함;
-- 위의 정확한 pool ID 두 개;
-- 각 pool에 key 2–256개;
+- 위의 정확한 `ica-services-essentials` pool ID 하나;
+- pool에 key 1–256개;
 - 각 pool 안에서 보수적인 identifier 형식에 맞는 고유한 key `id`;
 - 각 provider value는 비어 있지 않고 UTF-8 4096 byte 이하이며 NUL/newline/placeholder marker가 없어야 함;
 - 같은 pool 안에 중복 provider value가 없어야 함;
@@ -305,13 +334,6 @@ Auto-import는 `~/.pi/agent/key-rotator.json`, `~/.prime/agent/key-rotator.json`
 ```json
 {
   "pools": [
-    {
-      "poolId": "ibm-ica-nextgen",
-      "keys": [
-        { "id": "key-1", "value": "REPLACE_ME_NEXTGEN_KEY_1" },
-        { "id": "key-2", "value": "REPLACE_ME_NEXTGEN_KEY_2" }
-      ]
-    },
     {
       "poolId": "ica-services-essentials",
       "keys": [
@@ -325,7 +347,7 @@ Auto-import는 `~/.pi/agent/key-rotator.json`, `~/.prime/agent/key-rotator.json`
 
 Unix에서 installer-owned private directory는 mode `0700`, private file은 `0600`을 사용합니다. Windows는 protected current-user-only ACL을 사용하며 제한 또는 검증이 실패하면 중단합니다. Raw upstream key는 `state/secrets.json`에 plaintext로 저장되고 LiteLLM process environment에 로드됩니다. `config.yaml`에는 raw key가 아닌 environment reference가 들어갑니다.
 
-Local master key는 IBM key가 아닙니다. 모든 로컬 router route에 인증된 접근 권한을 주며 `client-models.generated.json`과 설정된 Pi/prime-agent `models.json`에 복사됩니다. Timestamp backup은 이전 client 파일 전체를 포함하므로 다른 provider의 secret도 들어갈 수 있습니다. State, client file, process environment, log, memory, backup을 secret으로 취급하십시오. 다른 process가 같은 client 파일을 쓰는 동안 병합하지 마십시오.
+Local master key는 IBM key가 아닙니다. 모든 로컬 router route에 인증된 접근 권한을 주며 `client-models.generated.json`과 설정된 Pi/prime-agent `models.json`에 복사됩니다. Upstream API key를 교체해도 이 로컬 key는 기본적으로 보존됩니다. 하위 명령 `bootstrap --replace-secrets --rotate-master-key`를 사용하면 명시적으로 회전하며, 그 후에는 사용 전에 설정된 모든 client 파일을 다시 생성해야 합니다. Timestamp backup은 이전 client 파일 전체를 포함하므로 다른 provider의 secret도 들어갈 수 있습니다. State, client file, process environment, log, memory, backup을 secret으로 취급하십시오. 다른 process가 같은 client 파일을 쓰는 동안 병합하지 마십시오.
 
 ## 네이티브 API endpoint
 
@@ -342,7 +364,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/responses \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ibm-ica--gpt-5.5-gus",
+    "model": "ica-se-openai--gpt-5.6-luna-dzus",
     "input": "Reply with OK.",
     "stream": false
   }'
@@ -359,7 +381,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/messages \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ibm-ica-claude--claude-sonnet-4-6",
+    "model": "ica-se-claude--claude-sonnet-4-6",
     "max_tokens": 64,
     "messages": [{"role": "user", "content": "Reply with OK."}]
   }'
@@ -372,7 +394,7 @@ Endpoint: `POST /v1/messages`
 
 ```bash
 curl --fail-with-body \
-  'http://127.0.0.1:4000/v1beta/models/ibm-ica-gemini--gemini-3.1-pro-preview:generateContent' \
+  'http://127.0.0.1:4000/v1beta/models/ica-se-gemini--gemini-3.7-flash:generateContent' \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -433,7 +455,7 @@ ica-router configure-clients --client /private/path/models.json
 ica-router bootstrap --port 4100 --client auto
 ```
 
-`bootstrap`은 secret을 생성하거나 보존하고 완전한 생성 state를 다시 씁니다. `generate`는 현재 generation이 일관된 경우에만 실행됩니다. `configure-clients`는 라우터 소유 provider 6개를 병합합니다. Auto mode는 기존 `~/.pi/agent/models.json`, `~/.prime/agent/models.json`만 변경합니다.
+`bootstrap`은 secret을 생성하거나 보존하고 완전한 생성 state를 다시 씁니다. `generate`는 현재 generation이 일관된 경우에만 실행됩니다. `configure-clients`는 현재 라우터 소유 provider 3개를 병합합니다. Auto mode는 기존 `~/.pi/agent/models.json`, `~/.prime/agent/models.json`만 변경합니다.
 
 영구 state에는 `secrets.json`, `config.yaml`(YAML로 유효한 JSON), `client-models.generated.json`, `runtime.json`, `generation.json`이 있습니다. Generation marker는 catalog, secrets, 생성 config, 생성 client, runtime의 normalized digest를 묶습니다. 마지막에 기록되므로 multi-file 생성이 중단되면 fail-closed합니다. Lifecycle file은 `command.lock`, 실행 중에만 존재하는 `run.json`, `router.log`입니다. 10 MiB를 넘는 log는 `router.log.1`로 rotate됩니다. Private `process-home`, `process-cache`, `process-tmp`는 caller home에서 LiteLLM을 격리하지만 dependency cache나 임시 data가 남을 수 있으므로 state 보호 및 retention 대상에 포함하십시오.
 
@@ -492,7 +514,7 @@ Private directory는 `0700`, file은 `0600`이어야 합니다. Windows에서는
 
 ### Placeholder, pool 또는 duplicate-key 오류
 
-Example은 유효한 secret이 아닙니다. 정확한 pool ID 두 개와 pool별로 서로 다른 key 두 개 이상이 필요합니다. Router를 중지하고 private source를 수정/import한 뒤 `bootstrap`을 실행하십시오. 기존 secret 문서를 교체하고 backup하려는 경우에만 `--replace-secrets`를 사용하십시오.
+Example은 유효한 secret이 아닙니다. 정확한 Services Essentials pool ID 하나와 사용 권한이 있는 key 한 개 이상이 필요합니다. Router를 중지하고 private source를 수정/import한 뒤 `bootstrap`을 실행하십시오. 기존 secret 문서를 교체하고 backup하려는 경우에만 `--replace-secrets`를 사용하십시오.
 
 ### Pi/prime-agent에 router provider가 없음
 
@@ -502,7 +524,7 @@ Auto mode는 기존 client 파일만 변경합니다. Router를 중지하고 정
 ica-router configure-clients --client /private/path/models.json
 ```
 
-Merge는 다른 provider ID를 보존하고 라우터 소유 ID 6개를 교체하며, 내용이 바뀔 때만 전체 파일의 timestamp backup을 만듭니다. 그 후 client를 다시 시작하십시오.
+Merge는 다른 provider ID를 보존하고 현재 라우터 소유 ID 3개를 교체하고 deprecated NextGen ID 3개를 제거하며, 내용이 바뀔 때만 전체 파일의 timestamp backup을 만듭니다. 그 후 client를 다시 시작하십시오.
 
 ### Local 인증 실패
 
@@ -520,7 +542,7 @@ Client에 오래된 local master key가 있을 수 있습니다. Router를 중�
 4. 새 platform installer를 실행합니다.
 5. `doctor`와 `status`를 확인하고 Pi/prime-agent를 다시 시작합니다.
 
-Installer는 update를 직렬화하고 versioned release를 stage합니다. 생성 state와 자동 감지 client 파일 두 개를 snapshot하고, 이전 managed process를 중지하고, `current`를 atomic 전환하고, bootstrap/check/start를 수행합니다. 유효한 기존 port, `maxFallbacks`, cooldown runtime 설정은 명시적 bootstrap flag로 바꾸지 않는 한 보존됩니다. Stop/switch 후 처리된 오류가 발생하면 이전 pointer, state, auto client 파일을 복원하고 이전 release 재시작을 시도합니다. 이전 versioned release는 보존됩니다.
+Installer는 update를 직렬화하고 versioned release를 stage합니다. 생성 state와 명시적으로 요청한 client 파일을 snapshot하고, 이전 managed process를 중지하고, `current`를 atomic 전환하고, bootstrap/check/start를 수행합니다. 유효한 기존 port, `maxFallbacks`, cooldown runtime 설정은 명시적 bootstrap flag로 바꾸지 않는 한 보존됩니다. Stop/switch 후 처리된 오류가 발생하면 이전 pointer, state, 요청한 client 파일을 복원하고 이전 release 재시작을 시도합니다. 이전 versioned release는 보존됩니다.
 
 Rollback은 **best effort**이며 crash-proof transaction이 아닙니다. 전원 손실, 강제 종료, storage/ACL 실패, custom client path는 부분 작업이나 수동 복구를 남길 수 있습니다. Local master key와 다른 client secret이 rollback snapshot 및 timestamp backup에 들어갑니다. 검증이 끝날 때까지 별도의 보호된 backup을 유지하고, 오래된 release와 backup을 의도적으로 정리하십시오.
 
@@ -529,7 +551,7 @@ Rollback은 **best effort**이며 crash-proof transaction이 아닙니다. 전�
 자동 uninstaller는 없습니다.
 
 1. Router를 중지합니다.
-2. 설정된 모든 client 파일에서 위의 `*-router` 항목 6개를 제거합니다.
+2. 설정된 모든 client 파일에서 위의 현재 `*-router` 항목 3개와 deprecated NextGen 항목 3개를 제거합니다.
 3. 보존이 필요하지 않으면 timestamp client backup을 확인하고 제거합니다.
 4. Wrapper/symlink와 확인한 install root를 제거합니다.
 5. Host, process environment, state, log 또는 backup 노출 가능성이 있으면 IBM credential을 rotate합니다.

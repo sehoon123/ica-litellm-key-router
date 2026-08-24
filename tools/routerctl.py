@@ -36,6 +36,13 @@ DEFAULT_PORT = 4000
 DEFAULT_MAX_FALLBACKS = 2
 DEFAULT_COOLDOWN_SECONDS = 60
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_KEYS_PER_POOL = 256
+DEPRECATED_POOL_IDS = {"ibm-ica-nextgen"}
+DEPRECATED_CLIENT_PROVIDER_IDS = {
+    "ibm-ica-router",
+    "ibm-ica-claude-router",
+    "ibm-ica-gemini-router",
+}
 ALLOWED_APIS = {
     "azure-openai-responses",
     "openai-responses",
@@ -406,6 +413,8 @@ def secrets_from_rotator(path: Path, catalog: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(pool, dict) or not isinstance(pool.get("poolId"), str):
             raise ConfigError("each key-rotator pool requires a string poolId")
         pool_id = pool["poolId"]
+        if pool_id in DEPRECATED_POOL_IDS and pool_id not in expected_pool_ids:
+            continue
         if pool_id not in expected_pool_ids:
             raise ConfigError(f"key-rotator config contains unknown pool {pool_id}")
         if pool_id in by_id:
@@ -442,7 +451,8 @@ def interactive_secrets(catalog: dict[str, Any]) -> dict[str, Any]:
             "interactive secret entry requires a real terminal; use --non-interactive "
             "with --import-key-rotator"
         )
-    print("No importable key-rotator.json was found. Enter ICA keys securely.")
+    print("No saved ICA keys were found. Enter each pool's keys securely.")
+    print("Submit an empty value after the last key in each pool.")
     output: dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "masterKey": "sk-local-" + secrets_module.token_urlsafe(32),
@@ -450,32 +460,26 @@ def interactive_secrets(catalog: dict[str, Any]) -> dict[str, Any]:
     }
     for pool in catalog["pools"]:
         pool_id = pool["id"]
-        while True:
-            raw_count = input(f"Number of keys for {pool_id} [2]: ").strip() or "2"
-            try:
-                count = int(raw_count)
-            except ValueError:
-                print("Enter an integer from 2 to 256.")
-                continue
-            if 2 <= count <= 256:
-                break
-            print("Enter an integer from 2 to 256.")
+        print(f"\nICA keys for {pool_id}:")
         keys: list[dict[str, str]] = []
-        for index in range(count):
-            label = input(f"Label for {pool_id} key {index + 1} [key-{index + 1}]: ").strip()
-            if not label:
-                label = f"key-{index + 1}"
-            value = getpass.getpass(f"Secret value for {pool_id}/{label}: ")
-            keys.append({"id": label, "value": value})
+        while len(keys) < MAX_KEYS_PER_POOL:
+            index = len(keys) + 1
+            value = getpass.getpass(
+                f"  API key {index} (press Enter to finish this pool): "
+            )
+            if not value:
+                if keys:
+                    break
+                print("  Enter at least one key before finishing this pool.")
+                continue
+            keys.append({"id": f"key-{index}", "value": value})
+        if len(keys) == MAX_KEYS_PER_POOL:
+            print(f"  Reached the maximum of {MAX_KEYS_PER_POOL} keys.")
         output["pools"][pool_id] = {"keys": keys}
     return validate_secrets(output, catalog)
 
 
-def validate_secrets(document: Any, catalog: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(document, dict) or document.get("schemaVersion") != SCHEMA_VERSION:
-        raise ConfigError("secrets schemaVersion must be 1")
-    master = document.get("masterKey")
-    pools = document.get("pools")
+def validate_master_key(master: Any) -> str:
     if (
         not isinstance(master, str)
         or not master.startswith("sk-")
@@ -484,6 +488,14 @@ def validate_secrets(document: Any, catalog: dict[str, Any]) -> dict[str, Any]:
         or any(char in master for char in "\x00\r\n")
     ):
         raise ConfigError("masterKey is missing, invalid, too large, or still a placeholder")
+    return master
+
+
+def validate_secrets(document: Any, catalog: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(document, dict) or document.get("schemaVersion") != SCHEMA_VERSION:
+        raise ConfigError("secrets schemaVersion must be 1")
+    master = validate_master_key(document.get("masterKey"))
+    pools = document.get("pools")
     if not isinstance(pools, dict):
         raise ConfigError("secrets pools must be an object")
     expected = {p["id"] for p in catalog["pools"]}
@@ -493,8 +505,10 @@ def validate_secrets(document: Any, catalog: dict[str, Any]) -> dict[str, Any]:
     for pool_id in sorted(expected):
         pool = pools[pool_id]
         entries = pool.get("keys") if isinstance(pool, dict) else None
-        if not isinstance(entries, list) or not (2 <= len(entries) <= 256):
-            raise ConfigError(f"pool {pool_id} requires 2-256 keys")
+        if not isinstance(entries, list) or not (1 <= len(entries) <= MAX_KEYS_PER_POOL):
+            raise ConfigError(
+                f"pool {pool_id} requires 1-{MAX_KEYS_PER_POOL} keys"
+            )
         ids: set[str] = set()
         fingerprints: set[str] = set()
         for index, entry in enumerate(entries):
@@ -530,6 +544,25 @@ def validate_secrets(document: Any, catalog: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("secrets document is too large to reload")
     return document
 
+
+def migrate_deprecated_secret_pools(
+    document: Any, catalog: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]] | None:
+    """Drop only explicitly retired pools while preserving all active secrets."""
+    if not isinstance(document, dict) or not isinstance(document.get("pools"), dict):
+        return None
+    expected = {pool["id"] for pool in catalog["pools"]}
+    actual = set(document["pools"])
+    removed = actual - expected
+    if not removed or expected - actual or not removed.issubset(DEPRECATED_POOL_IDS):
+        return None
+    migrated = copy.deepcopy(document)
+    migrated["pools"] = {
+        pool_id: migrated["pools"][pool_id] for pool_id in sorted(expected)
+    }
+    return validate_secrets(migrated, catalog), sorted(removed)
+
+
 def runtime_environment(secrets_doc: dict[str, Any], catalog: dict[str, Any]) -> dict[str, str]:
     env = {MASTER_ENV: secrets_doc["masterKey"]}
     for pool in catalog["pools"]:
@@ -547,6 +580,12 @@ def generate_litellm_config(
 ) -> dict[str, Any]:
     validate_catalog(catalog)
     validate_secrets(secrets_doc, catalog)
+    # Never schedule more router retries than distinct alternate credentials.
+    # Router retry settings are global, so use the smallest active pool.
+    effective_fallbacks = min(
+        max_fallbacks,
+        min(len(secrets_doc["pools"][pool["id"]]["keys"]) - 1 for pool in catalog["pools"]),
+    )
     provider_pool = pool_by_provider(catalog)
     model_list: list[dict[str, Any]] = []
     for provider_id, provider in catalog["providers"].items():
@@ -592,14 +631,14 @@ def generate_litellm_config(
             "routing_strategy": "simple-shuffle",
             # Router-owned retries select another healthy sibling after the
             # failed deployment is cooled down. Provider SDK retries remain 0.
-            "num_retries": max_fallbacks,
+            "num_retries": effective_fallbacks,
             "enable_weighted_failover": False,
             "retry_policy": {
                 "BadRequestErrorRetries": 0,
                 "ContentPolicyViolationErrorRetries": 0,
-                "AuthenticationErrorRetries": max_fallbacks,
-                "TimeoutErrorRetries": max_fallbacks,
-                "RateLimitErrorRetries": max_fallbacks,
+                "AuthenticationErrorRetries": effective_fallbacks,
+                "TimeoutErrorRetries": effective_fallbacks,
+                "RateLimitErrorRetries": effective_fallbacks,
             },
             "allowed_fails": 0,
             "cooldown_time": cooldown_seconds,
@@ -677,6 +716,8 @@ def merge_client_models(path: Path, generated: dict[str, Any]) -> tuple[bool, Pa
     else:
         current = {"providers": {}}
     updated = copy.deepcopy(current)
+    for provider_id in DEPRECATED_CLIENT_PROVIDER_IDS:
+        updated["providers"].pop(provider_id, None)
     for provider_id, provider in generated["providers"].items():
         updated["providers"][provider_id] = provider
     rendered = json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
@@ -944,6 +985,8 @@ def verify_windows_private_file(path: Path) -> None:
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     state_dir: Path = args.state_dir
+    if getattr(args, "rotate_master_key", False) and not args.replace_secrets:
+        raise ConfigError("--rotate-master-key requires --replace-secrets")
     if args.host != DEFAULT_HOST:
         raise ConfigError(f"--host must remain local-only {DEFAULT_HOST}")
     catalog = validate_catalog(load_json(args.catalog, "catalog"))
@@ -964,15 +1007,50 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         else int((existing_runtime or {}).get("cooldownSeconds", DEFAULT_COOLDOWN_SECONDS))
     )
     secrets_path = state_dir / "secrets.json"
-    if secrets_path.exists() and not args.replace_secrets:
+    loaded_secrets: Any | None = None
+    if secrets_path.exists() or secrets_path.is_symlink():
+        _reject_unsafe_existing_file(secrets_path, "secrets")
         if os.name == "nt":
-            _reject_unsafe_existing_file(secrets_path, "secrets")
             restrict_windows_file(secrets_path)
-        secrets_doc = validate_secrets(load_private_json(secrets_path, "secrets"), catalog)
+        if not (args.replace_secrets and getattr(args, "rotate_master_key", False)):
+            try:
+                loaded_secrets = load_private_json(secrets_path, "secrets")
+            except ConfigError:
+                if not args.replace_secrets:
+                    raise
+                print(
+                    "WARNING: existing secrets cannot be parsed or validated; "
+                    "generated a new local master key. Reconfigure every client "
+                    "models.json before use.",
+                    file=sys.stderr,
+                )
+
+    if loaded_secrets is not None and not args.replace_secrets:
+        migration = migrate_deprecated_secret_pools(loaded_secrets, catalog)
+        if migration is not None:
+            secrets_doc, removed_pools = migration
+            backup = backup_file(secrets_path)
+            if backup:
+                print(f"Backed up previous secrets to {backup}")
+            atomic_write(
+                secrets_path,
+                json.dumps(secrets_doc, ensure_ascii=False, indent=2) + "\n",
+                private=True,
+            )
+            restrict_windows_file(secrets_path)
+            print(
+                "Removed deprecated secret pools: "
+                + ", ".join(removed_pools)
+                + " (secret values were not printed)"
+            )
+        else:
+            secrets_doc = validate_secrets(loaded_secrets, catalog)
         print(f"Preserving existing secrets: {secrets_path}")
     else:
         import_path: Path | None = None
-        if args.import_key_rotator:
+        if getattr(args, "prompt_keys", False):
+            import_path = None
+        elif args.import_key_rotator:
             if args.import_key_rotator == "auto":
                 import_path = next((p for p in auto_rotator_candidates() if p.exists()), None)
             else:
@@ -984,11 +1062,36 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             raise ConfigError("no existing secrets or importable key-rotator config")
         else:
             secrets_doc = interactive_secrets(catalog)
+
+        # Replacing upstream API keys must not silently invalidate existing
+        # client files. Preserve the local proxy master key unless rotation is
+        # explicitly requested.
+        if loaded_secrets is not None and not getattr(args, "rotate_master_key", False):
+            try:
+                existing_master = validate_master_key(
+                    loaded_secrets.get("masterKey")
+                    if isinstance(loaded_secrets, dict)
+                    else None
+                )
+            except ConfigError:
+                print(
+                    "WARNING: existing local master key is invalid; generated a new one. "
+                    "Reconfigure every client models.json before use.",
+                    file=sys.stderr,
+                )
+            else:
+                secrets_doc["masterKey"] = existing_master
+                secrets_doc = validate_secrets(secrets_doc, catalog)
+
         if secrets_path.exists():
             backup = backup_file(secrets_path)
             if backup:
                 print(f"Backed up previous secrets to {backup}")
-        atomic_write(secrets_path, json.dumps(secrets_doc, ensure_ascii=False, indent=2) + "\n", private=True)
+        atomic_write(
+            secrets_path,
+            json.dumps(secrets_doc, ensure_ascii=False, indent=2) + "\n",
+            private=True,
+        )
         restrict_windows_file(secrets_path)
         print(f"Wrote private secrets file: {secrets_path}")
     write_generated_state(
@@ -1701,6 +1804,14 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = sub.add_parser("bootstrap", help="import/prompt keys and generate all configuration")
     bootstrap.add_argument("--import-key-rotator", default="auto")
     bootstrap.add_argument("--replace-secrets", action="store_true")
+    bootstrap.add_argument(
+        "--rotate-master-key", action="store_true",
+        help="rotate the local proxy key when replacing upstream secrets",
+    )
+    bootstrap.add_argument(
+        "--prompt-keys", action="store_true",
+        help="read API keys interactively until an empty value ends each pool",
+    )
     bootstrap.add_argument("--non-interactive", action="store_true")
     bootstrap.add_argument("--client", action="append", default=[])
     bootstrap.add_argument(

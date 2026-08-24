@@ -4,7 +4,12 @@ param(
     [string]$InstallRoot = $(if ($env:ICA_ROUTER_HOME) { $env:ICA_ROUTER_HOME } else { Join-Path $env:LOCALAPPDATA "IcaLiteLLMKeyRouter" }),
     [string]$SourceDirectory = $env:ICA_ROUTER_SOURCE_DIR,
     [string]$KeyRotatorPath = $env:ICA_ROUTER_KEY_ROTATOR,
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [switch]$PiModels,
+    [switch]$PrimeModels,
+    [string[]]$ModelsJson = @(),
+    [switch]$ReplaceKeys,
+    [switch]$ForceInstall
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -255,6 +260,117 @@ foreach ($directory in @($StateDir, $ReleasesDir, $ToolsDir, (Join-Path $Install
     [void][System.IO.Directory]::CreateDirectory($directory)
     Set-PrivateAcl $directory
 }
+
+$ClientPaths = [System.Collections.Generic.List[string]]::new()
+if ($PiModels) { $ClientPaths.Add((Join-Path $HOME '.pi\agent\models.json')) }
+if ($PrimeModels) { $ClientPaths.Add((Join-Path $HOME '.prime\agent\models.json')) }
+foreach ($requestedPath in $ModelsJson) {
+    if ([string]::IsNullOrWhiteSpace($requestedPath)) { throw "ModelsJson paths must not be empty" }
+    if ($requestedPath.Contains("`r") -or $requestedPath.Contains("`n")) {
+        throw "ModelsJson paths must not contain control characters"
+    }
+    $ClientPaths.Add([System.IO.Path]::GetFullPath($requestedPath))
+}
+$ClientPaths = @($ClientPaths | Select-Object -Unique)
+
+function Invoke-InstalledRouter([string]$Wrapper, [string[]]$Arguments) {
+    $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    & $systemPowerShell -NoProfile -ExecutionPolicy Bypass -File $Wrapper @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "ica-router command failed ($LASTEXITCODE): $($Arguments -join ' ')"
+    }
+}
+
+$ExistingWrapper = Join-Path $InstallRoot 'ica-router.ps1'
+$ExistingReady = $false
+$ExistingRelease = $null
+if (-not $ForceInstall -and
+    (Test-Path -LiteralPath (Join-Path $StateDir 'secrets.json')) -and
+    (Test-Path -LiteralPath $ExistingWrapper) -and
+    (Test-Path -LiteralPath $CurrentFile)) {
+    Assert-NotReparse $ExistingWrapper 'existing wrapper'
+    Assert-NotReparse $CurrentFile 'current pointer'
+    $existingReleaseId = [System.IO.File]::ReadAllText($CurrentFile).Trim()
+    if ($existingReleaseId -match '^v[0-9]+\.[0-9]+\.[0-9]+(?:-local-[A-Za-z0-9-]+)?$') {
+        $ExistingRelease = Join-Path $ReleasesDir $existingReleaseId
+        $existingComplete = Join-Path $ExistingRelease '.complete'
+        $sourceChanged = $false
+        $candidateSource = $null
+        if ($SourceDirectory) { $candidateSource = $SourceDirectory }
+        elseif ($PSScriptRoot) { $candidateSource = $PSScriptRoot }
+        if ($candidateSource) {
+            foreach ($relativeSource in @('catalog.json', 'tools\routerctl.py')) {
+                $sourceFile = Join-Path $candidateSource $relativeSource
+                $existingFile = Join-Path (Join-Path $ExistingRelease 'app') $relativeSource
+                if ((Test-Path -LiteralPath $sourceFile) -and (Test-Path -LiteralPath $existingFile)) {
+                    $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceFile).Hash
+                    $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $existingFile).Hash
+                    if ($sourceHash -ne $existingHash) { $sourceChanged = $true; break }
+                }
+            }
+            if ($sourceChanged) { Write-Host 'Router source changed since the selected release; performing an update.' }
+        }
+        if (-not $sourceChanged -and
+            (Test-Path -LiteralPath $existingComplete) -and
+            (Test-Path -LiteralPath (Join-Path $ExistingRelease '.venv\Scripts\python.exe'))) {
+            $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            & $systemPowerShell -NoProfile -ExecutionPolicy Bypass -File $ExistingWrapper doctor *> $null
+            $ExistingReady = $LASTEXITCODE -eq 0
+        }
+    }
+}
+
+if ($ExistingReady) {
+    try {
+        if ($ReplaceKeys) {
+            Write-Host "Replacing saved Services Essentials keys. Submit an empty value after the last key."
+            Invoke-InstalledRouter $ExistingWrapper @('stop')
+            $bootstrapArguments = @('bootstrap','--replace-secrets')
+            if ($KeyRotatorPath) { $bootstrapArguments += @('--import-key-rotator', $KeyRotatorPath) }
+            else { $bootstrapArguments += '--prompt-keys' }
+            if ($ClientPaths.Count -gt 0) {
+                foreach ($clientPath in $ClientPaths) {
+                    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($clientPath))
+                    $bootstrapArguments += @('--client', $clientPath)
+                }
+            } else { $bootstrapArguments += '--no-configure-clients' }
+            if ($NonInteractive -or $env:ICA_ROUTER_NON_INTERACTIVE -eq '1' -or [Console]::IsInputRedirected) {
+                $bootstrapArguments += '--non-interactive'
+            }
+            Invoke-InstalledRouter $ExistingWrapper $bootstrapArguments
+        } elseif ($ClientPaths.Count -gt 0) {
+            Invoke-InstalledRouter $ExistingWrapper @('stop')
+            $clientArguments = @('configure-clients')
+            foreach ($clientPath in $ClientPaths) {
+                [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($clientPath))
+                $clientArguments += @('--client', $clientPath)
+            }
+            Invoke-InstalledRouter $ExistingWrapper $clientArguments
+        } else {
+            Write-Host 'Saved Services Essentials keys and a valid LiteLLM configuration already exist.'
+            Write-Host 'Skipping installation and ensuring LiteLLM is running.'
+        }
+        Invoke-InstalledRouter $ExistingWrapper @('start')
+        Invoke-InstalledRouter $ExistingWrapper @('status')
+        if ($ClientPaths.Count -eq 0) {
+            Write-Host 'Pi models.json was not modified.'
+            Write-Host '  Easiest: rerun this installer with -PiModels.'
+            Write-Host '  Or separately:'
+            Write-Host "    powershell -File `"$ExistingWrapper`" stop"
+            Write-Host "    powershell -File `"$ExistingWrapper`" configure-clients --client `"$HOME\.pi\agent\models.json`""
+            Write-Host "    powershell -File `"$ExistingWrapper`" start"
+        }
+    }
+    catch {
+        & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $ExistingWrapper start *> $null
+        throw
+    }
+    finally {
+        if ($script:InstallLockStream) { $script:InstallLockStream.Dispose(); $script:InstallLockStream = $null }
+    }
+    exit 0
+}
+
 Install-VerifiedUv
 Invoke-Uv @('python','install',$PythonVersion)
 
@@ -432,12 +548,12 @@ exit $LASTEXITCODE
             Copy-Item -LiteralPath $sourceState -Destination (Join-Path $rollbackState $name)
         }
     }
-    $clientPaths = @((Join-Path $HOME '.pi\agent\models.json'), (Join-Path $HOME '.prime\agent\models.json'))
-    for ($index = 0; $index -lt $clientPaths.Count; $index++) {
-        Write-Utf8File (Join-Path $rollbackClients ("$index.path")) ($clientPaths[$index] + "`n")
-        if (Test-Path -LiteralPath $clientPaths[$index]) {
-            Assert-NotReparse $clientPaths[$index] 'client models file'
-            Copy-Item -LiteralPath $clientPaths[$index] -Destination (Join-Path $rollbackClients ("$index.data"))
+    $RollbackClientPaths = @($ClientPaths)
+    for ($index = 0; $index -lt $RollbackClientPaths.Count; $index++) {
+        Write-Utf8File (Join-Path $rollbackClients ("$index.path")) ($RollbackClientPaths[$index] + "`n")
+        if (Test-Path -LiteralPath $RollbackClientPaths[$index]) {
+            Assert-NotReparse $RollbackClientPaths[$index] 'client models file'
+            Copy-Item -LiteralPath $RollbackClientPaths[$index] -Destination (Join-Path $rollbackClients ("$index.data"))
         }
     }
     Protect-PrivateTree $RollbackDir
@@ -465,7 +581,7 @@ exit $LASTEXITCODE
                 Set-PrivateAcl $targetState
             } else { Remove-Item -Force -LiteralPath $targetState -ErrorAction SilentlyContinue }
         }
-        for ($index = 0; $index -lt 2; $index++) {
+        for ($index = 0; $index -lt $RollbackClientPaths.Count; $index++) {
             $clientPath = [System.IO.File]::ReadAllText((Join-Path $rollbackClients ("$index.path"))).Trim()
             $savedClient = Join-Path $rollbackClients ("$index.data")
             if (Test-Path -LiteralPath $savedClient) {
@@ -501,7 +617,19 @@ exit $LASTEXITCODE
 
     $Control = Join-Path $AppDir 'tools\routerctl.py'
     $Catalog = Join-Path $AppDir 'catalog.json'
-    $BootstrapArgs = @($Control,'--state-dir',$StateDir,'--catalog',$Catalog,'--venv',$VenvDir,'bootstrap','--client','auto','--import-key-rotator',$(if ($KeyRotatorPath) { $KeyRotatorPath } else { 'auto' }))
+    $BootstrapArgs = @($Control,'--state-dir',$StateDir,'--catalog',$Catalog,'--venv',$VenvDir,'bootstrap')
+    if ($ClientPaths.Count -gt 0) {
+        foreach ($clientPath in $ClientPaths) {
+            [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($clientPath))
+            $BootstrapArgs += @('--client', $clientPath)
+        }
+    } else { $BootstrapArgs += '--no-configure-clients' }
+    if ($ReplaceKeys -and -not $KeyRotatorPath) {
+        $BootstrapArgs += @('--replace-secrets','--prompt-keys')
+    } else {
+        $BootstrapArgs += @('--import-key-rotator', $(if ($KeyRotatorPath) { $KeyRotatorPath } else { 'auto' }))
+        if ($ReplaceKeys) { $BootstrapArgs += '--replace-secrets' }
+    }
     if ($NonInteractive -or $env:ICA_ROUTER_NON_INTERACTIVE -eq '1' -or [Console]::IsInputRedirected) { $BootstrapArgs += '--non-interactive' }
     & $Python @BootstrapArgs
     if ($LASTEXITCODE -ne 0) { throw "configuration failed" }
@@ -522,7 +650,16 @@ exit $LASTEXITCODE
     Write-Host "  Status:  powershell -File `"$Wrapper`" status"
     Write-Host "  Stop:    powershell -File `"$Wrapper`" stop"
     Write-Host "  Start:   powershell -File `"$Wrapper`" start"
-    Write-Host "Restart Pi/prime-agent, then select a provider ending in '-router'."
+    if ($ClientPaths.Count -gt 0) {
+        Write-Host "Restart Pi/prime-agent, then select a provider ending in '-router'."
+    } else {
+        Write-Host 'Pi models.json was not modified.'
+        Write-Host '  Easiest: rerun this installer with -PiModels.'
+        Write-Host '  Or separately:'
+        Write-Host "    powershell -File `"$Wrapper`" stop"
+        Write-Host "    powershell -File `"$Wrapper`" configure-clients --client `"$HOME\.pi\agent\models.json`""
+        Write-Host "    powershell -File `"$Wrapper`" start"
+    }
 }
 catch {
     $failure = $_

@@ -27,9 +27,72 @@ RELEASE_DIR=""
 ROLLBACK_DIR=""
 RELEASE_PREEXISTED=0
 INSTALL_LOCK_HELD=0
+FORCE_INSTALL=0
+REPLACE_KEYS=0
+MODEL_CLIENTS=()
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: ./install-linux.sh [options]
+
+With no options:
+  - first run: install LiteLLM, prompt for each pool's API keys until blank,
+    generate configuration, and start the local router;
+  - later runs: reuse saved keys/configuration and only ensure the router is running.
+
+Options:
+  --pi-models          Create or merge ~/.pi/agent/models.json.
+  --prime-models       Create or merge ~/.prime/agent/models.json.
+  --models-json PATH   Create or merge a custom models.json (repeatable).
+  --replace-keys       Prompt for all API keys again, then restart the router.
+  --force-install      Reinstall/update even when a valid installation exists.
+  -h, --help           Show this help.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --pi-models)
+      MODEL_CLIENTS+=("$HOME/.pi/agent/models.json")
+      shift
+      ;;
+    --prime-models)
+      MODEL_CLIENTS+=("$HOME/.prime/agent/models.json")
+      shift
+      ;;
+    --models-json)
+      (($# >= 2)) || die "--models-json requires a path"
+      MODEL_CLIENTS+=("$2")
+      shift 2
+      ;;
+    --replace-keys)
+      REPLACE_KEYS=1
+      shift
+      ;;
+    --force-install)
+      FORCE_INSTALL=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1 (use --help)"
+      ;;
+  esac
+done
+
+if ((${#MODEL_CLIENTS[@]} > 0)); then
+  for client_path in "${MODEL_CLIENTS[@]}"; do
+    [[ -n "$client_path" ]] || die "models.json path must not be empty"
+    [[ "$client_path" != *$'\n'* && "$client_path" != *$'\r'* ]] \
+      || die "models.json path contains a control character"
+  done
+fi
 
 cleanup() {
   local status=$?
@@ -68,6 +131,98 @@ fi
 INSTALL_LOCK_HELD=1
 printf '%s\n' "$$" > "$INSTALL_ROOT/.install.lock/pid"
 [[ ! -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]] || die "current pointer must be a symlink"
+
+WRAPPER="$INSTALL_ROOT/ica-router"
+
+configure_requested_clients() {
+  ((${#MODEL_CLIENTS[@]} > 0)) || return 0
+  local client
+  local client_args=()
+  for client in "${MODEL_CLIENTS[@]}"; do
+    client_args+=(--client "$client")
+  done
+  "$WRAPPER" configure-clients "${client_args[@]}"
+}
+
+print_models_hint() {
+  if ((${#MODEL_CLIENTS[@]} == 0)); then
+    say "Pi models.json was not modified."
+    say "  Easiest: $0 --pi-models"
+    say "  Or separately:"
+    say "    $WRAPPER stop"
+    say "    $WRAPPER configure-clients --client \"$HOME/.pi/agent/models.json\""
+    say "    $WRAPPER start"
+  fi
+}
+
+EXISTING_READY=0
+if [[ "$FORCE_INSTALL" == "0" ]] &&
+  [[ -s "$STATE_DIR/secrets.json" ]] &&
+  [[ -x "$WRAPPER" ]] &&
+  [[ -L "$CURRENT_LINK" ]]; then
+  CURRENT_RELEASE="$(cd -- "$CURRENT_LINK" 2>/dev/null && pwd -P || true)"
+  case "$CURRENT_RELEASE" in
+    "$RELEASES_DIR"/*)
+      if [[ -f "$CURRENT_RELEASE/.complete" ]] && "$WRAPPER" doctor >/dev/null 2>&1; then
+        EXISTING_READY=1
+        INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || true)"
+        for source_relative in catalog.json tools/routerctl.py; do
+          if [[ -f "$INSTALLER_DIR/$source_relative" ]] &&
+            [[ -f "$CURRENT_RELEASE/app/$source_relative" ]] &&
+            [[ ! "$INSTALLER_DIR/$source_relative" -ef "$CURRENT_RELEASE/app/$source_relative" ]] &&
+            ! cmp -s -- "$INSTALLER_DIR/$source_relative" "$CURRENT_RELEASE/app/$source_relative"; then
+            say "Router source changed since the selected release; performing an update."
+            EXISTING_READY=0
+            break
+          fi
+        done
+      fi
+      ;;
+  esac
+fi
+
+if [[ "$EXISTING_READY" == "1" ]]; then
+  if ((${#MODEL_CLIENTS[@]} > 0)); then
+    # Complete all parent preparation before stopping a healthy router.
+    for client in "${MODEL_CLIENTS[@]}"; do
+      mkdir -p -- "$(dirname -- "$client")"
+    done
+  fi
+  if [[ "$REPLACE_KEYS" == "1" ]]; then
+    [[ -r /dev/tty ]] || die "--replace-keys requires an interactive terminal"
+    say "Replacing saved Services Essentials keys. Submit an empty value after the last key."
+    "$WRAPPER" stop >/dev/null 2>&1 || die "could not safely stop the existing router"
+    bootstrap_args=(bootstrap --replace-secrets --prompt-keys)
+    if ((${#MODEL_CLIENTS[@]} > 0)); then
+      for client in "${MODEL_CLIENTS[@]}"; do
+        bootstrap_args+=(--client "$client")
+      done
+    else
+      bootstrap_args+=(--no-configure-clients)
+    fi
+    if ! "$WRAPPER" "${bootstrap_args[@]}" </dev/tty; then
+      "$WRAPPER" start >/dev/null 2>&1 \
+        || say "WARNING: router could not be restarted after key replacement failed" >&2
+      die "key replacement failed"
+    fi
+  elif ((${#MODEL_CLIENTS[@]} > 0)); then
+    "$WRAPPER" stop >/dev/null 2>&1 || die "could not safely stop the existing router"
+    if ! configure_requested_clients; then
+      "$WRAPPER" start >/dev/null 2>&1 \
+        || say "WARNING: router could not be restarted after client configuration failed" >&2
+      die "client configuration failed"
+    fi
+  else
+    say "Saved ICA keys and a valid LiteLLM configuration already exist."
+    say "Skipping installation and ensuring LiteLLM is running."
+  fi
+
+  "$WRAPPER" start
+  "$WRAPPER" status
+  print_models_hint
+  INSTALL_SUCCESS=1
+  exit 0
+fi
 
 fetch() {
   local url="$1" output="$2"
@@ -315,16 +470,18 @@ for name in secrets.json config.yaml client-models.generated.json runtime.json g
     chmod 600 "$ROLLBACK_DIR/state/$name"
   fi
 done
-CLIENT_INDEX=0
-for client_path in "$HOME/.pi/agent/models.json" "$HOME/.prime/agent/models.json"; do
-  CLIENT_INDEX=$((CLIENT_INDEX + 1))
-  printf '%s\n' "$client_path" > "$ROLLBACK_DIR/clients/$CLIENT_INDEX.path"
-  if [[ -e "$client_path" || -L "$client_path" ]]; then
-    [[ -f "$client_path" && ! -L "$client_path" ]] || die "unsafe client models file: $client_path"
-    cp -- "$client_path" "$ROLLBACK_DIR/clients/$CLIENT_INDEX.data"
-    chmod 600 "$ROLLBACK_DIR/clients/$CLIENT_INDEX.data"
-  fi
-done
+CLIENT_COUNT=0
+if ((${#MODEL_CLIENTS[@]} > 0)); then
+  for client_path in "${MODEL_CLIENTS[@]}"; do
+    CLIENT_COUNT=$((CLIENT_COUNT + 1))
+    printf '%s\n' "$client_path" > "$ROLLBACK_DIR/clients/$CLIENT_COUNT.path"
+    if [[ -e "$client_path" || -L "$client_path" ]]; then
+      [[ -f "$client_path" && ! -L "$client_path" ]] || die "unsafe client models file: $client_path"
+      cp -- "$client_path" "$ROLLBACK_DIR/clients/$CLIENT_COUNT.data"
+      chmod 600 "$ROLLBACK_DIR/clients/$CLIENT_COUNT.data"
+    fi
+  done
+fi
 
 rollback() {
   set +e
@@ -340,13 +497,14 @@ rollback() {
       rm -f -- "$STATE_DIR/$name"
     fi
   done
-  for index in 1 2; do
+  for ((index = 1; index <= CLIENT_COUNT; index++)); do
     client_path="$(cat "$ROLLBACK_DIR/clients/$index.path")"
     if [[ -f "$ROLLBACK_DIR/clients/$index.data" ]]; then
       mkdir -p -- "$(dirname -- "$client_path")"
       cp -- "$ROLLBACK_DIR/clients/$index.data" "$client_path.rollback.$$"
       chmod 600 "$client_path.rollback.$$"
-      "$MANAGED_PYTHON" -I -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])'         "$client_path.rollback.$$" "$client_path"
+      "$MANAGED_PYTHON" -I -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' \
+        "$client_path.rollback.$$" "$client_path"
     else
       rm -f -- "$client_path"
     fi
@@ -375,9 +533,21 @@ SWITCHED=1
 
 BOOTSTRAP=("$VENV_DIR/bin/python" "$APP_DIR/tools/routerctl.py" \
   --state-dir "$STATE_DIR" --catalog "$APP_DIR/catalog.json" --venv "$VENV_DIR" \
-  bootstrap --client auto)
-if [[ -n "${ICA_ROUTER_KEY_ROTATOR:-}" ]]; then
+  bootstrap)
+if ((${#MODEL_CLIENTS[@]} > 0)); then
+  for client in "${MODEL_CLIENTS[@]}"; do
+    [[ -n "$client" ]] || die "models.json path must not be empty"
+    mkdir -p -- "$(dirname -- "$client")"
+    BOOTSTRAP+=(--client "$client")
+  done
+else
+  BOOTSTRAP+=(--no-configure-clients)
+fi
+if [[ "$REPLACE_KEYS" == "1" && -z "${ICA_ROUTER_KEY_ROTATOR:-}" ]]; then
+  BOOTSTRAP+=(--replace-secrets --prompt-keys)
+elif [[ -n "${ICA_ROUTER_KEY_ROTATOR:-}" ]]; then
   BOOTSTRAP+=(--import-key-rotator "$ICA_ROUTER_KEY_ROTATOR")
+  [[ "$REPLACE_KEYS" == "0" ]] || BOOTSTRAP+=(--replace-secrets)
 else
   BOOTSTRAP+=(--import-key-rotator auto)
 fi
@@ -413,4 +583,7 @@ say "  Status:  $WRAPPER status"
 say "  Stop:    $WRAPPER stop"
 say "  Start:   $WRAPPER start"
 say "  Doctor:  $WRAPPER doctor"
-say "Restart Pi/prime-agent, then select a provider ending in '-router'."
+print_models_hint
+if ((${#MODEL_CLIENTS[@]} > 0)); then
+  say "Restart Pi/prime-agent, then select a provider ending in '-router'."
+fi

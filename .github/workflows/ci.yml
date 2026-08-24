@@ -121,15 +121,15 @@ jobs:
               errors.append("examples/secrets.example.json must use schemaVersion 1")
           require_placeholder(example.get("masterKey"), "example masterKey")
 
-          expected_pools = {"ibm-ica-nextgen", "ica-services-essentials"}
+          expected_pools = {"ica-services-essentials"}
           pools = example.get("pools")
           if not isinstance(pools, dict) or set(pools) != expected_pools:
-              errors.append("example must contain exactly the two catalog credential pools")
+              errors.append("example must contain exactly the Services Essentials credential pool")
           else:
               for pool_id, pool in pools.items():
                   keys = pool.get("keys") if isinstance(pool, dict) else None
-                  if not isinstance(keys, list) or len(keys) < 2:
-                      errors.append(f"example pool {pool_id} must contain at least two keys")
+                  if not isinstance(keys, list) or len(keys) < 1:
+                      errors.append(f"example pool {pool_id} must contain at least one key")
                       continue
                   for index, entry in enumerate(keys):
                       if not isinstance(entry, dict):
@@ -155,8 +155,8 @@ jobs:
               for model in provider["models"]
           }
           client_providers = {f"{provider_id}-router" for provider_id in catalog["providers"]}
-          if len(aliases) != 25 or len(client_providers) != 6:
-              errors.append("catalog must generate exactly 25 aliases and 6 client providers")
+          if len(aliases) != 11 or len(client_providers) != 3:
+              errors.append("catalog must generate exactly 11 aliases and 3 client providers")
           for path in (root / "README.md", root / "README.ko.md"):
               if not path.is_file():
                   continue
@@ -178,8 +178,6 @@ jobs:
           }
           allowed_test_tokens = {
               "sk-local-test-master-key-1234567890",
-              "sk-nextgen-test-value-a",
-              "sk-nextgen-test-value-b",
               "sk-services-test-value-a",
               "sk-services-test-value-b",
               "sk-services-test-value-c",
@@ -359,13 +357,6 @@ jobs:
           document = {
               "pools": [
                   {
-                      "poolId": "ibm-ica-nextgen",
-                      "keys": [
-                          {"id": "ci-nextgen-a", "value": "ci-dummy-not-a-provider-key-nextgen-a"},
-                          {"id": "ci-nextgen-b", "value": "ci-dummy-not-a-provider-key-nextgen-b"},
-                      ],
-                  },
-                  {
                       "poolId": "ica-services-essentials",
                       "keys": [
                           {"id": "ci-services-a", "value": "ci-dummy-not-a-provider-key-services-a"},
@@ -383,15 +374,15 @@ jobs:
           export ICA_ROUTER_KEY_ROTATOR="$rotator_path"
           export ICA_ROUTER_NON_INTERACTIVE=1
 
-          bash ./install-linux.sh
+          bash ./install-linux.sh --pi-models
           first_release="$(readlink -f -- "$install_root/current")"
           [[ -d "$first_release" ]]
 
           bash ./install-linux.sh
           second_release="$(readlink -f -- "$install_root/current")"
-          [[ -d "$second_release" && "$second_release" != "$first_release" ]]
+          [[ -d "$second_release" && "$second_release" == "$first_release" ]]
           release_count="$(find "$install_root/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)"
-          [[ "$release_count" -ge 2 ]]
+          [[ "$release_count" -eq 1 ]]
 
           "$wrapper" doctor
           "$wrapper" status
@@ -419,14 +410,14 @@ jobs:
           }
           assert platform.python_version() == "3.12.13"
           assert version("litellm") == "1.98.0"
-          assert len(catalog["providers"]) == 6
-          assert len(aliases) == 25
-          assert len(generated["providers"]) == 6
-          assert len(config["model_list"]) == 50
-          assert set(secrets["pools"]) == {"ibm-ica-nextgen", "ica-services-essentials"}
+          assert len(catalog["providers"]) == 3
+          assert len(aliases) == 11
+          assert len(generated["providers"]) == 3
+          assert len(config["model_list"]) == 22
+          assert set(secrets["pools"]) == {"ica-services-essentials"}
           assert all(len(pool["keys"]) == 2 for pool in secrets["pools"].values())
           assert "keep-ci-dummy" in client["providers"]
-          assert len(client["providers"]) == 7
+          assert len(client["providers"]) == 4
           PY
           [[ "$("$install_root/tools/uv-0.12.2/uv" --version)" == "uv 0.12.2"* ]]
 
@@ -568,13 +559,6 @@ jobs:
           $rotator = @{
             pools = @(
               @{
-                poolId = "ibm-ica-nextgen"
-                keys = @(
-                  @{ id = "ci-nextgen-a"; value = (New-DummyValue "nextgen-a") },
-                  @{ id = "ci-nextgen-b"; value = (New-DummyValue "nextgen-b") }
-                )
-              },
-              @{
                 poolId = "ica-services-essentials"
                 keys = @(
                   @{ id = "ci-services-a"; value = (New-DummyValue "services-a") },
@@ -598,12 +582,13 @@ jobs:
             -InstallRoot $installRoot `
             -SourceDirectory $sourceDirectory `
             -KeyRotatorPath $rotatorPath `
-            -NonInteractive
+            -NonInteractive `
+            -PiModels
           if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
           $currentPointer = Join-Path $installRoot "current"
           $firstRelease = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
 
-          # A second local-source install exercises update, old-process stop, and pointer switch.
+          # A second run with saved keys exercises the fast start-only path.
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
             -InstallRoot $installRoot `
             -SourceDirectory $sourceDirectory `
@@ -611,9 +596,9 @@ jobs:
             -NonInteractive
           if ($LASTEXITCODE -ne 0) { throw "Second installer run exited with $LASTEXITCODE" }
           $secondRelease = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
-          if ($secondRelease -eq $firstRelease) { throw "Second install did not switch the current release" }
-          if (@(Get-ChildItem -Directory -LiteralPath (Join-Path $installRoot "releases")).Count -lt 2) {
-            throw "Second install did not retain versioned release directories"
+          if ($secondRelease -ne $firstRelease) { throw "Fast path unexpectedly switched the current release" }
+          if (@(Get-ChildItem -Directory -LiteralPath (Join-Path $installRoot "releases")).Count -ne 1) {
+            throw "Fast path unexpectedly created another release directory"
           }
           $selectedRelease = Join-Path (Join-Path $installRoot "releases") $secondRelease
           $installedPython = Join-Path $selectedRelease ".venv\Scripts\python.exe"
@@ -641,20 +626,20 @@ jobs:
           foreach ($provider in $clientConfig.providers.PSObject.Properties.Value) {
             $modelCount += @($provider.models).Count
           }
-          if ($providerCount -ne 6) { throw "Expected 6 client providers, got $providerCount" }
-          if ($modelCount -ne 25) { throw "Expected 25 model aliases, got $modelCount" }
+          if ($providerCount -ne 3) { throw "Expected 3 client providers, got $providerCount" }
+          if ($modelCount -ne 11) { throw "Expected 11 model aliases, got $modelCount" }
 
           $liteConfig = Get-Content -Raw (Join-Path $state "config.yaml") | ConvertFrom-Json
-          if (@($liteConfig.model_list).Count -ne 50) {
-            throw "Expected 50 deployments with two dummy keys per pool"
+          if (@($liteConfig.model_list).Count -ne 22) {
+            throw "Expected 22 deployments with two Services Essentials dummy keys"
           }
 
           $mergedClient = Get-Content -Raw -LiteralPath $clientPath | ConvertFrom-Json
           if ($null -eq $mergedClient.providers."keep-ci-dummy") {
             throw "Installer removed an unrelated client provider"
           }
-          if (@($mergedClient.providers.PSObject.Properties).Count -ne 7) {
-            throw "Merged client should contain one unrelated and six router providers"
+          if (@($mergedClient.providers.PSObject.Properties).Count -ne 4) {
+            throw "Merged client should contain one unrelated and three router providers"
           }
           $clientBackups = @(Get-ChildItem -File -LiteralPath $clientAgentDir | Where-Object { $_.Name -like "models.json.backup-*" })
           if ($clientBackups.Count -lt 1) { throw "Client merge did not create a backup" }

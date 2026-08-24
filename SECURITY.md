@@ -131,7 +131,7 @@ The project does not install TLS certificates, configure a firewall, validate re
 
 ### Upstream credentials
 
-Canonical upstream values are plaintext in `<install-root>/state/secrets.json`. Each pool requires 2–256 keys. Individual values are limited to 4096 UTF-8 bytes and the combined secret environment to 24 KiB. Imported values are copied; they do not remain dynamically linked to an environment variable or external file.
+Canonical upstream values are plaintext in `<install-root>/state/secrets.json`. The Services Essentials pool requires 1–256 keys. Individual values are limited to 4096 UTF-8 bytes and the combined secret environment to 24 KiB. Imported values are copied; they do not remain dynamically linked to an environment variable or external file.
 
 At start, keys are copied into the LiteLLM process environment. `config.yaml` contains variable references, not raw values. Same-user diagnostics on some systems, administrators, crash collectors, the process itself, and injected code can still observe the environment.
 
@@ -178,7 +178,7 @@ Defaults are:
 - zero allowed failures for configured authentication/rate/timeout/server/unavailable/gateway classes, making the deployment immediately cooldown-eligible; and
 - a 60-second cooldown.
 
-A request can therefore make the initial attempt plus at most two eligible router retries by default. It does not exhaust a large pool. Explicit policy entries block bad-request and content-policy retries, but stock LiteLLM `1.98.0` has no `InternalServerErrorRetries` key. The global count is necessarily broader to cover intended 5xx behavior and can follow other standard retryable-status decisions; this is not a strict four-class allowlist. Availability controls do not validate key ownership, revoke a leaked key, or guarantee an upstream did not accept a request before returning an error.
+A request can therefore make the initial attempt plus at most two eligible router retries by default, capped by the number of alternate keys; a one-key pool gets zero router retries. It does not exhaust a large pool. Explicit policy entries block bad-request and content-policy retries, but stock LiteLLM `1.98.0` has no `InternalServerErrorRetries` key. The global count is necessarily broader to cover intended 5xx behavior and can follow other standard retryable-status decisions; this is not a strict four-class allowlist. Availability controls do not validate key ownership, revoke a leaked key, or guarantee an upstream did not accept a request before returning an error.
 
 A pre-output failure can be ambiguous: an upstream may execute or bill work before the router observes failure and selects another same-alias deployment. There is **no mid-stream failover**. Retrying a stream can repeat billable or state-changing work. Applications must design for idempotency and duplicate handling where the native API supports them.
 
@@ -220,7 +220,7 @@ A checksum and artifact from one compromised channel are not independent publish
 
 ### Update transaction and rollback limits
 
-An installer-wide lock prevents concurrent normal updates. The installer stages a versioned release, snapshots core generated state and the two auto-detected client files, safely stops the prior managed process, atomically changes `current`, preserves valid existing port/retry/cooldown settings unless explicitly overridden, runs bootstrap/doctor/start, and retains old releases. On a handled failure after stop or switch, it attempts to restore the old pointer/state/auto clients and restart the previous release.
+An installer-wide lock prevents concurrent normal updates. The installer stages a versioned release, snapshots core generated state and explicitly requested client files, safely stops the prior managed process, atomically changes `current`, preserves valid existing port/retry/cooldown settings unless explicitly overridden, runs bootstrap/doctor/start, and retains old releases. On a handled failure after stop or switch, it attempts to restore the old pointer/state/requested clients and restart the previous release.
 
 This is **best-effort rollback**, not an ACID or power-loss transaction. Forced termination, host crash, storage exhaustion, filesystem/ACL failure, malicious interference, or a custom client path can leave partial state. Rollback itself and old-process restart can fail. Keep an independent protected backup until verification. On Linux, a crash can leave `.install.lock`; remove it only after confirming no installer runs. On Windows, the `install.lock` file normally persists while only its exclusive handle denotes activity.
 
@@ -237,7 +237,7 @@ Before first use:
 - [ ] Keep install/state/client paths off shared, synced, or network filesystems.
 - [ ] Confirm the listener is `127.0.0.1`, not wildcard/LAN/forwarded.
 - [ ] Use direct IBM HTTPS and normal system trust; custom proxy/CA environment is not inherited.
-- [ ] Generate a unique local master key and at least two distinct authorized keys in each exact pool.
+- [ ] Generate a unique local master key and at least one authorized Services Essentials key.
 - [ ] Run `doctor` and check deployment count and listen address.
 - [ ] Run `status` and confirm identity/liveness.
 - [ ] Inspect Unix modes or Windows protected ACLs for state/client files.
@@ -265,7 +265,7 @@ For planned upstream-key rotation:
 6. restart clients and confirm `status`; and
 7. remove obsolete secret/client backups under the retention policy.
 
-Replacement import creates a new random local master as well as replacing upstream values. Every client file must receive that new value before it can authenticate. Do not delete backups until rollback is no longer required, but do not retain them indefinitely.
+Replacement import preserves the validated existing local master by default while replacing upstream values, so existing client authentication remains valid. `bootstrap --replace-secrets --rotate-master-key` explicitly creates a new local master; every client file must receive that new value before it can authenticate. If the old secret document or master is unreadable or invalid during replacement, a new master is generated with a warning and clients must be reconfigured. Do not delete backups until rollback is no longer required, but do not retain them indefinitely.
 
 For suspected compromise:
 

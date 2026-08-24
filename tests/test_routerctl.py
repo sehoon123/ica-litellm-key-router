@@ -24,12 +24,6 @@ class RouterConfigTests(unittest.TestCase):
             "schemaVersion": 1,
             "masterKey": "sk-local-test-master-key-1234567890",
             "pools": {
-                "ibm-ica-nextgen": {
-                    "keys": [
-                        {"id": "a", "value": "sk-nextgen-test-value-a"},
-                        {"id": "b", "value": "sk-nextgen-test-value-b"},
-                    ]
-                },
                 "ica-services-essentials": {
                     "keys": [
                         {"id": "a", "value": "sk-services-test-value-a"},
@@ -40,15 +34,16 @@ class RouterConfigTests(unittest.TestCase):
             },
         }
 
-    def test_catalog_has_all_six_providers_and_25_models(self) -> None:
-        self.assertEqual(6, len(self.catalog["providers"]))
-        self.assertEqual(25, sum(len(p["models"]) for p in self.catalog["providers"].values()))
+    def test_catalog_has_only_services_essentials_providers_and_11_models(self) -> None:
+        self.assertEqual(3, len(self.catalog["providers"]))
+        self.assertEqual(11, sum(len(p["models"]) for p in self.catalog["providers"].values()))
 
     def test_config_expands_models_by_pool_keys_without_raw_secrets(self) -> None:
         config = routerctl.generate_litellm_config(self.catalog, self.secrets)
-        # 14 nextgen models * 2 keys + 11 services models * 3 keys.
-        self.assertEqual(61, len(config["model_list"]))
+        # 11 Services Essentials models * 3 keys.
+        self.assertEqual(33, len(config["model_list"]))
         rendered = json.dumps(config)
+        self.assertNotIn("nextgen", rendered.lower())
         self.assertNotIn(self.secrets["masterKey"], rendered)
         for pool in self.secrets["pools"].values():
             for key in pool["keys"]:
@@ -59,7 +54,7 @@ class RouterConfigTests(unittest.TestCase):
         self.assertEqual(2, config["router_settings"]["retry_policy"]["RateLimitErrorRetries"])
         self.assertEqual(0, config["router_settings"]["allowed_fails"])
         openai_deployment = next(
-            item for item in config["model_list"] if item["model_name"].startswith("ibm-ica--")
+            item for item in config["model_list"] if item["model_name"].startswith("ica-se-openai--")
         )
         self.assertTrue(openai_deployment["litellm_params"]["model"].startswith("azure/"))
         self.assertEqual("v1", openai_deployment["litellm_params"]["api_version"])
@@ -68,27 +63,26 @@ class RouterConfigTests(unittest.TestCase):
             openai_deployment["litellm_params"]["api_base"],
         )
 
-    def test_duplicate_upstream_model_ids_get_distinct_aliases(self) -> None:
-        left = routerctl.model_alias("ibm-ica", "gpt-5.6-luna-dzus")
-        right = routerctl.model_alias("ica-se-openai", "gpt-5.6-luna-dzus")
-        self.assertNotEqual(left, right)
+    def test_model_alias_is_provider_qualified(self) -> None:
+        alias = routerctl.model_alias("ica-se-openai", "gpt-5.6-luna-dzus")
+        self.assertEqual("ica-se-openai--gpt-5.6-luna-dzus", alias)
 
     def test_client_protocol_bases_preserve_native_surfaces(self) -> None:
         generated = routerctl.generate_client_providers(
             self.catalog, self.secrets["masterKey"], "127.0.0.1", 4000
         )["providers"]
-        self.assertEqual("http://127.0.0.1:4000/v1", generated["ibm-ica-router"]["baseUrl"])
-        self.assertEqual("openai-responses", generated["ibm-ica-router"]["api"])
-        self.assertEqual("http://127.0.0.1:4000", generated["ibm-ica-claude-router"]["baseUrl"])
+        self.assertEqual("http://127.0.0.1:4000/v1", generated["ica-se-openai-router"]["baseUrl"])
+        self.assertEqual("openai-responses", generated["ica-se-openai-router"]["api"])
+        self.assertEqual("http://127.0.0.1:4000", generated["ica-se-claude-router"]["baseUrl"])
         self.assertEqual(
             "http://127.0.0.1:4000/v1beta",
-            generated["ibm-ica-gemini-router"]["baseUrl"],
+            generated["ica-se-gemini-router"]["baseUrl"],
         )
         self.assertEqual(
             f"Bearer {self.secrets['masterKey']}",
-            generated["ibm-ica-gemini-router"]["headers"]["Authorization"],
+            generated["ica-se-gemini-router"]["headers"]["Authorization"],
         )
-        self.assertEqual(25, sum(len(p["models"]) for p in generated.values()))
+        self.assertEqual(11, sum(len(p["models"]) for p in generated.values()))
 
     def test_imports_literal_rotator_without_printing_or_transforming_values(self) -> None:
         rotator = {
@@ -112,18 +106,55 @@ class RouterConfigTests(unittest.TestCase):
             actual = imported["pools"][source["poolId"]]["keys"]
             self.assertEqual(source["keys"], actual)
 
+    def test_import_ignores_the_explicitly_deprecated_nextgen_pool(self) -> None:
+        rotator = {
+            "pools": [
+                {
+                    "poolId": "ibm-ica-nextgen",
+                    "keys": [{"id": "retired", "value": "retired-placeholder-value"}],
+                },
+                {
+                    "poolId": "ica-services-essentials",
+                    "keys": [{"id": "active", "value": "active-placeholder-value"}],
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "key-rotator.json"
+            path.write_text(json.dumps(rotator))
+            imported = routerctl.secrets_from_rotator(path, self.catalog)
+        self.assertEqual({"ica-services-essentials"}, set(imported["pools"]))
+        self.assertEqual(
+            "active-placeholder-value",
+            imported["pools"]["ica-services-essentials"]["keys"][0]["value"],
+        )
+
     def test_client_merge_is_idempotent_and_keeps_unrelated_provider(self) -> None:
         generated = routerctl.generate_client_providers(
             self.catalog, self.secrets["masterKey"], "127.0.0.1", 4000
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "models.json"
-            path.write_text(json.dumps({"providers": {"keep-me": {"baseUrl": "http://local"}}}))
+            path.write_text(
+                json.dumps(
+                    {
+                        "providers": {
+                            "keep-me": {"baseUrl": "http://local"},
+                            "ibm-ica-router": {"baseUrl": "http://deprecated"},
+                        }
+                    }
+                )
+            )
             changed, backup = routerctl.merge_client_models(path, generated)
             self.assertTrue(changed)
             self.assertIsNotNone(backup)
             data = json.loads(path.read_text())
             self.assertIn("keep-me", data["providers"])
+            self.assertNotIn("ibm-ica-router", data["providers"])
+            self.assertEqual(
+                {"ica-se-openai-router", "ica-se-claude-router", "ica-se-gemini-router"},
+                set(data["providers"]) - {"keep-me"},
+            )
             if os.name != "nt":
                 path.chmod(0o644)
             changed2, backup2 = routerctl.merge_client_models(path, generated)
@@ -134,9 +165,27 @@ class RouterConfigTests(unittest.TestCase):
             if os.name != "nt":
                 self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
 
+    def test_single_services_essentials_key_is_valid(self) -> None:
+        document = json.loads(json.dumps(self.secrets))
+        document["pools"]["ica-services-essentials"]["keys"] = document["pools"][
+            "ica-services-essentials"
+        ]["keys"][:1]
+        self.assertEqual(document, routerctl.validate_secrets(document, self.catalog))
+        config = routerctl.generate_litellm_config(self.catalog, document)
+        self.assertEqual(0, config["router_settings"]["num_retries"])
+        self.assertEqual(
+            0, config["router_settings"]["retry_policy"]["RateLimitErrorRetries"]
+        )
+
+        document["pools"]["ica-services-essentials"]["keys"] = self.secrets["pools"][
+            "ica-services-essentials"
+        ]["keys"][:2]
+        config = routerctl.generate_litellm_config(self.catalog, document)
+        self.assertEqual(1, config["router_settings"]["num_retries"])
+
     def test_placeholder_secrets_are_rejected(self) -> None:
         bad = json.loads(json.dumps(self.secrets))
-        bad["pools"]["ibm-ica-nextgen"]["keys"][0]["value"] = "REPLACE_ME"
+        bad["pools"]["ica-services-essentials"]["keys"][0]["value"] = "REPLACE_ME"
         with self.assertRaises(routerctl.ConfigError):
             routerctl.validate_secrets(bad, self.catalog)
 
@@ -177,8 +226,8 @@ class RouterConfigTests(unittest.TestCase):
     def test_secret_size_control_char_and_key_id_bounds(self) -> None:
         for mutate in (
             lambda doc: doc.__setitem__("masterKey", "sk-" + "x" * 2000),
-            lambda doc: doc["pools"]["ibm-ica-nextgen"]["keys"][0].__setitem__("id", "bad id"),
-            lambda doc: doc["pools"]["ibm-ica-nextgen"]["keys"][0].__setitem__("value", "bad\nkey"),
+            lambda doc: doc["pools"]["ica-services-essentials"]["keys"][0].__setitem__("id", "bad id"),
+            lambda doc: doc["pools"]["ica-services-essentials"]["keys"][0].__setitem__("value", "bad\nkey"),
         ):
             bad = json.loads(json.dumps(self.secrets))
             mutate(bad)
@@ -187,7 +236,7 @@ class RouterConfigTests(unittest.TestCase):
 
     def test_duplicate_and_unknown_rotator_pools_are_rejected(self) -> None:
         base_pool = {
-            "poolId": "ibm-ica-nextgen",
+            "poolId": "ica-services-essentials",
             "keys": [{"id": "a", "value": "sk-a"}, {"id": "b", "value": "sk-b"}],
         }
         for pools in ([base_pool, dict(base_pool)], [dict(base_pool, poolId="unknown")]):
@@ -200,7 +249,9 @@ class RouterConfigTests(unittest.TestCase):
     def test_catalog_rejects_environment_name_collisions(self) -> None:
         bad = json.loads(json.dumps(self.catalog))
         bad["pools"][0]["id"] = "a-b"
-        bad["pools"][1]["id"] = "a_b"
+        bad["pools"].append(
+            {"id": "a_b", "providers": list(bad["pools"][0]["providers"])}
+        )
         with self.assertRaises(routerctl.ConfigError):
             routerctl.validate_catalog(bad)
 
@@ -209,8 +260,11 @@ class RouterConfigTests(unittest.TestCase):
         args = parser.parse_args(["bootstrap", "--client", "/tmp/only-this.json"])
         self.assertEqual(["/tmp/only-this.json"], args.client)
         self.assertFalse(args.no_configure_clients)
-        args2 = parser.parse_args(["bootstrap", "--no-configure-clients"])
+        args2 = parser.parse_args(["bootstrap", "--no-configure-clients", "--prompt-keys"])
         self.assertTrue(args2.no_configure_clients)
+        self.assertTrue(args2.prompt_keys)
+        args3 = parser.parse_args(["bootstrap", "--replace-secrets", "--rotate-master-key"])
+        self.assertTrue(args3.rotate_master_key)
 
     def test_runtime_environment_forces_safe_logging_and_no_proxy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,6 +300,147 @@ class RouterConfigTests(unittest.TestCase):
         with mock.patch.object(routerctl.sys.stdin, "isatty", return_value=False):
             with self.assertRaises(routerctl.ConfigError):
                 routerctl.interactive_secrets(self.catalog)
+
+    def test_interactive_secret_entry_reads_until_blank_per_pool(self) -> None:
+        entered = ["", "se-secret-one", "se-secret-two", ""]
+        with (
+            mock.patch.object(routerctl.sys.stdin, "isatty", return_value=True),
+            mock.patch.object(routerctl.sys.stderr, "isatty", return_value=True),
+            mock.patch.object(routerctl.getpass, "getpass", side_effect=entered),
+        ):
+            document = routerctl.interactive_secrets(self.catalog)
+
+        services = document["pools"]["ica-services-essentials"]["keys"]
+        self.assertEqual([entry["id"] for entry in services], ["key-1", "key-2"])
+        self.assertEqual(
+            [entry["value"] for entry in services],
+            ["se-secret-one", "se-secret-two"],
+        )
+
+    def test_replace_keys_repairs_invalid_old_pools_but_preserves_valid_master(self) -> None:
+        invalid_old = json.loads(json.dumps(self.secrets))
+        invalid_old["pools"] = {
+            "unknown-retired-pool": {
+                "keys": [{"id": "old", "value": "old-invalid-pool-value"}]
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            routerctl.atomic_write(
+                state / "secrets.json", json.dumps(invalid_old) + "\n", private=True
+            )
+            rotator = root / "rotator.json"
+            rotator.write_text(
+                json.dumps(
+                    {
+                        "pools": [
+                            {
+                                "poolId": "ica-services-essentials",
+                                "keys": [
+                                    {"id": "new", "value": "new-services-value"}
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = types.SimpleNamespace(
+                state_dir=state,
+                catalog=ROOT / "catalog.json",
+                host="127.0.0.1",
+                port=None,
+                max_fallbacks=None,
+                cooldown_seconds=None,
+                replace_secrets=True,
+                rotate_master_key=False,
+                prompt_keys=False,
+                import_key_rotator=str(rotator),
+                non_interactive=True,
+                no_configure_clients=True,
+                client=[],
+            )
+            routerctl.cmd_bootstrap(args)
+            repaired = routerctl.load_private_json(state / "secrets.json", "secrets")
+            self.assertEqual(invalid_old["masterKey"], repaired["masterKey"])
+            self.assertEqual({"ica-services-essentials"}, set(repaired["pools"]))
+
+    def test_explicit_master_rotation_repairs_malformed_old_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            routerctl.atomic_write(state / "secrets.json", "{malformed\n", private=True)
+            rotator = root / "rotator.json"
+            rotator.write_text(
+                json.dumps(
+                    {
+                        "pools": [
+                            {
+                                "poolId": "ica-services-essentials",
+                                "keys": [{"id": "new", "value": "new-services-value"}],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = types.SimpleNamespace(
+                state_dir=state,
+                catalog=ROOT / "catalog.json",
+                host="127.0.0.1",
+                port=None,
+                max_fallbacks=None,
+                cooldown_seconds=None,
+                replace_secrets=True,
+                rotate_master_key=True,
+                prompt_keys=False,
+                import_key_rotator=str(rotator),
+                non_interactive=True,
+                no_configure_clients=True,
+                client=[],
+            )
+            routerctl.cmd_bootstrap(args)
+            repaired = routerctl.load_private_json(state / "secrets.json", "secrets")
+            self.assertTrue(repaired["masterKey"].startswith("sk-local-"))
+            backups = list(state.glob("secrets.json.backup-*"))
+            self.assertEqual(1, len(backups))
+            self.assertEqual("{malformed\n", backups[0].read_text(encoding="utf-8"))
+
+    def test_bootstrap_migrates_only_the_deprecated_nextgen_pool(self) -> None:
+        legacy = json.loads(json.dumps(self.secrets))
+        legacy["pools"]["ibm-ica-nextgen"] = {
+            "keys": [{"id": "old", "value": "ci-retired-nextgen-placeholder-value"}]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir(mode=0o700)
+            routerctl.atomic_write(
+                state / "secrets.json", json.dumps(legacy) + "\n", private=True
+            )
+            args = types.SimpleNamespace(
+                state_dir=state,
+                catalog=ROOT / "catalog.json",
+                host="127.0.0.1",
+                port=None,
+                max_fallbacks=None,
+                cooldown_seconds=None,
+                replace_secrets=False,
+                import_key_rotator=None,
+                non_interactive=True,
+                no_configure_clients=True,
+                client=[],
+            )
+            routerctl.cmd_bootstrap(args)
+            saved = routerctl.load_private_json(state / "secrets.json", "secrets")
+            self.assertEqual({"ica-services-essentials"}, set(saved["pools"]))
+            self.assertEqual(
+                self.secrets["pools"]["ica-services-essentials"],
+                saved["pools"]["ica-services-essentials"],
+            )
+            self.assertEqual(1, len(list(state.glob("secrets.json.backup-*"))))
 
     def test_bootstrap_preserves_custom_runtime_on_update_and_secret_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -311,6 +506,8 @@ class RouterConfigTests(unittest.TestCase):
             args.replace_secrets = True
             args.import_key_rotator = str(rotator)
             routerctl.cmd_bootstrap(args)
+            replaced_secrets = routerctl.load_private_json(state / "secrets.json", "secrets")
+            self.assertEqual(self.secrets["masterKey"], replaced_secrets["masterKey"])
             runtime = routerctl.load_private_json(state / "runtime.json", "runtime")
             self.assertEqual((runtime["port"], runtime["maxFallbacks"], runtime["cooldownSeconds"]), (4100, 7, 123))
             clients = routerctl.load_private_json(state / "client-models.generated.json", "clients")
