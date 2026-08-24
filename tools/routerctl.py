@@ -845,11 +845,15 @@ foreach ($entry in $allowed) {
             script, str(path), sid,
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
         check=False,
     )
     if result.returncode != 0:
-        raise ConfigError(f"could not restrict Windows directory ACL for {path}")
+        detail = (result.stderr or "").strip().replace("\n", " ")[:500]
+        raise ConfigError(
+            f"could not restrict Windows directory ACL for {path} (exit {result.returncode}): {detail}"
+        )
 
 
 def _run_windows_acl_check(path: Path, set_acl: bool) -> None:
@@ -862,6 +866,7 @@ $sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
 if ($args[2] -eq 'set') {
   $acl = New-Object System.Security.AccessControl.FileSecurity
   $acl.SetAccessRuleProtection($true, $false)
+  $acl.SetOwner($sid)
   $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow')
   [void]$acl.AddAccessRule($rule)
   [System.IO.File]::SetAccessControl($target, $acl)
@@ -888,12 +893,16 @@ foreach ($entry in $allowed) {
             "set" if set_acl else "verify",
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
         check=False,
     )
     if result.returncode != 0:
         action = "restrict" if set_acl else "verify"
-        raise ConfigError(f"could not {action} Windows ACL for {path}")
+        detail = (result.stderr or "").strip().replace("\n", " ")[:500]
+        raise ConfigError(
+            f"could not {action} Windows ACL for {path} (exit {result.returncode}): {detail}"
+        )
 
 
 def restrict_windows_file(path: Path) -> None:
