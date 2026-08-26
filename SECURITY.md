@@ -27,7 +27,7 @@ Report a defect wholly within LiteLLM, Python, `uv`, IBM ICA, or a model provide
 
 ## Security objective and scope
 
-The router reduces the number of local clients that receive upstream IBM ICA keys. Raw upstream values remain in one private state document and the LiteLLM process environment. Clients receive a separate local master key.
+The router prevents local clients from receiving upstream IBM ICA keys. Raw upstream values remain in one private state document and the LiteLLM process environment. Clients obtain a separate local master key at runtime through a command-backed helper rather than persisting another copy in generated configuration.
 
 The supported deployment is one trusted operating-system user on one workstation, with one LiteLLM worker on loopback. This project is **not**:
 
@@ -57,8 +57,9 @@ A normal installation trusts:
 3. the release source, especially `catalog.json`, `tools/routerctl.py`, installers, wrapper, and lock file;
 4. Astral's `uv` installer and managed-Python distribution channel;
 5. the frozen Python package artifacts and LiteLLM;
-6. every local client that receives the master key; and
-7. IBM ICA and selected upstream model services.
+6. every local client and helper invocation that receives the master key at runtime;
+7. the optional generated systemd user unit and user service manager; and
+8. IBM ICA and selected upstream model services.
 
 At runtime the launcher constructs a minimal LiteLLM environment instead of copying the caller's environment. It supplies fixed system/venv paths, private home/cache/temp locations under state, provider keys, production/error logging, telemetry-disable controls, and `NO_PROXY=*`. Ambient proxy, custom-CA, user-site, and environment-based provider settings are intentionally not inherited. Direct IBM HTTPS with the normal system trust configuration is therefore required.
 
@@ -69,8 +70,8 @@ Protect:
 - every IBM ICA upstream credential;
 - the local router master key;
 - `<install-root>/state/secrets.json` and any backup;
-- `client-models.generated.json`;
-- modified Pi/prime-agent `models.json` files and their whole-file timestamped backups;
+- `client-models.generated.json` and command-backed helper paths;
+- modified Pi/prime-agent and Claude Code files, the dedicated Codex profile, and their whole-file timestamped backups;
 - temporary installer rollback snapshots;
 - state-owned `process-home`, `process-cache`, and `process-tmp`, which can retain dependency cache or temporary data;
 - process environments, memory, debug sessions, crash dumps, swap, and hibernation data;
@@ -84,7 +85,7 @@ Protect:
 
 ### Protections provided in part
 
-- **Reduced key distribution.** Local clients receive one local master key instead of all upstream keys.
+- **Reduced key distribution and persistence.** Local clients receive one local master key instead of all upstream keys, and generated client configuration invokes a private helper rather than persisting another master-key copy.
 - **Loopback-only listener.** Host validation rejects non-`127.0.0.1` addresses.
 - **Local authentication.** LiteLLM requires the local master key for authenticated proxy routes.
 - **Raw-key exclusion from generated config.** `config.yaml` uses environment references, and `doctor` checks known raw values are absent.
@@ -94,7 +95,7 @@ Protect:
 - **Safer client merge.** Unrelated provider IDs are retained, changed files are backed up, and writes use replacement rather than in-place truncation.
 - **Process identity fencing.** `run.json` records creation identity, executable, config path/digest, host, and port. `stop` refuses to signal a mismatched live PID.
 - **Command serialization.** OS locks on `command.lock` serialize lifecycle and state-changing commands. Installer-wide locks serialize installation/update attempts.
-- **Startup readiness.** `start` verifies process identity, local liveness, and an authenticated model list containing a configured alias without calling IBM.
+- **Startup readiness and supervision.** `start` verifies process identity, local liveness, and an authenticated model list containing a configured alias without calling IBM. The optional systemd user unit runs the worker in the foreground, performs the same authenticated readiness check, and restarts failures.
 - **Bounded release extraction.** Remote installers reject ZIP traversal, links/special files, collisions, unexpected top-level names, excessive members, and excessive expanded data.
 - **Dependency/source checks.** Remote source ZIP SHA-256, pinned `uv` installer SHA-256, exact Python/LiteLLM versions, frozen sync, and `uv pip check` are enforced.
 - **Failed-credential availability.** Selected error classes make a deployment immediately eligible for cooldown and a same-alias router retry.
@@ -139,14 +140,11 @@ Do not hand a secret document to an untrusted parser or editor. Stop the managed
 
 ### Local master key and client files
 
-The master key is different from every IBM key. It is stored in `secrets.json` and intentionally copied to:
+The master key is different from every IBM key. Its canonical persistent copy is `secrets.json`. Generated Pi/prime-agent providers, Claude Code `apiKeyHelper`, and the dedicated Codex profile call `ica-router client-token`; the helper reads the private state at runtime and prints the credential only to the requesting client process. The Gemini helper variant prints a `Bearer ` prefix.
 
-- `<state-dir>/client-models.generated.json`; and
-- each configured Pi/prime-agent `models.json`.
+This removes the router key from newly generated client files and their backups, but does not make it inaccessible to same-user processes. Every configured client receives the key in memory, can log or leak helper output, and may cache the result briefly. A timestamped whole-file backup can still contain unrelated credentials or an old literal router key from a pre-migration file. Protect and expire these copies deliberately.
 
-A timestamped backup is a copy of the entire previous client file. It can contain an older local master key and unrelated provider credentials. The update rollback area can temporarily hold the same data. Protect and expire these copies deliberately.
-
-The router restricts the client file and backup but does not change an arbitrary parent directory's Windows ACL. A user who can replace names in that directory can bypass a file-only ACL. Use an access-controlled local directory and coordinate other writers.
+The router restricts generated client files and backups. It also restricts the managed Claude and Codex parent directories, but the legacy arbitrary Pi models path retains its parent permissions. A user who can replace names in such a directory can bypass a file-only ACL. Use an access-controlled local directory and coordinate other writers.
 
 ### Logs and request data
 

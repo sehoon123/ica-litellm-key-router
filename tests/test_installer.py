@@ -43,6 +43,7 @@ esac
         environment.update(
             {
                 "HOME": str(home),
+                "XDG_CONFIG_HOME": str(home / ".config"),
                 "ICA_ROUTER_HOME": str(install),
                 "TEST_WRAPPER_LOG": str(log),
             }
@@ -55,6 +56,17 @@ esac
             text=True,
             timeout=30,
         )
+
+    def test_help_documents_systemd_user_option(self) -> None:
+        result = subprocess.run(
+            ["/bin/bash", str(INSTALLER), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("--systemd-user", result.stdout)
 
     def test_saved_keys_skip_install_and_only_ensure_router_is_running(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

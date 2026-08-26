@@ -8,6 +8,7 @@ Generated LiteLLM configuration contains environment-variable references.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 from contextlib import contextmanager
 import getpass
@@ -18,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import secrets as secrets_module
+import shlex
 import shutil
 import signal
 import socket
@@ -64,6 +66,13 @@ CLIENT_API = {
 }
 PLACEHOLDER_RE = re.compile(r"(?:REPLACE[_-]?ME|YOUR[_-]?KEY|<[^>]+>)", re.I)
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SYSTEMD_UNIT_NAME = "ica-litellm-key-router.service"
+SYSTEMD_UNIT_MARKER = "# Managed by ICA LiteLLM Key Router"
+DEFAULT_CLAUDE_MODEL = "ica-se-claude--claude-opus-5"
+DEFAULT_CLAUDE_OPUS_MODEL = "ica-se-claude--claude-opus-5"
+DEFAULT_CLAUDE_SONNET_MODEL = "ica-se-claude--claude-sonnet-5"
+DEFAULT_CLAUDE_HAIKU_MODEL = "ica-se-claude--claude-haiku-4-5"
+DEFAULT_CODEX_MODEL = "ica-se-openai--gpt-5.6-sol"
 
 
 def windows_system_directory() -> Path:
@@ -694,9 +703,72 @@ def local_base_url(api: str, host: str, port: int) -> str:
     raise ConfigError(f"unsupported client api: {api}")
 
 
+def router_wrapper_invocation(state_dir: Path) -> tuple[str, list[str]]:
+    root = state_dir.parent
+    if os.name == "nt":
+        wrapper = root / "ica-router.ps1"
+        return windows_powershell(), [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(wrapper),
+        ]
+    return str(root / "ica-router"), []
+
+
+def shell_command(arguments: list[str]) -> str:
+    if any("\x00" in value or "\n" in value or "\r" in value for value in arguments):
+        raise ConfigError("client helper command contains a control character")
+    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
+
+
+def windows_client_token_command(
+    powershell: str, wrapper: Path, bearer: bool = False
+) -> str:
+    wrapper_value = str(wrapper)
+    if any(char in wrapper_value for char in ("\x00", "\n", "\r")):
+        raise ConfigError("Windows client helper path contains a control character")
+    quoted_wrapper = "'" + wrapper_value.replace("'", "''") + "'"
+    helper_args = " client-token" + (" --bearer" if bearer else "")
+    script = (
+        f"& {quoted_wrapper}{helper_args}; "
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+    )
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    # The encoded payload keeps install-root metacharacters away from cmd.exe,
+    # which invokes Pi/Claude shell helpers on Windows.
+    return subprocess.list2cmdline(
+        [
+            powershell,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ]
+    )
+
+
+def client_token_command(state_dir: Path, bearer: bool = False) -> str:
+    if os.name == "nt":
+        return windows_client_token_command(
+            windows_powershell(), state_dir.parent / "ica-router.ps1", bearer
+        )
+    executable, prefix_args = router_wrapper_invocation(state_dir)
+    arguments = [executable, *prefix_args, "client-token"]
+    if bearer:
+        arguments.append("--bearer")
+    return shell_command(arguments)
+
+
 def generate_client_providers(
-    catalog: dict[str, Any], master_key: str, host: str, port: int
+    catalog: dict[str, Any], host: str, port: int, state_dir: Path
 ) -> dict[str, Any]:
+    token_command = client_token_command(state_dir)
+    bearer_command = client_token_command(state_dir, bearer=True)
     providers: dict[str, Any] = {}
     for provider_id, provider in catalog["providers"].items():
         local_id = provider_id + "-router"
@@ -704,7 +776,7 @@ def generate_client_providers(
             "name": f"{provider.get('name', provider_id)} via local LiteLLM",
             "baseUrl": local_base_url(provider["api"], host, port),
             "api": CLIENT_API[provider["api"]],
-            "apiKey": master_key,
+            "apiKey": f"!{token_command}",
             "models": [],
         }
         if "compat" in provider:
@@ -713,7 +785,7 @@ def generate_client_providers(
             # Google SDK auth is normally x-goog-api-key. LiteLLM's unified
             # native router endpoint authenticates its local master key as a
             # Bearer token, while the upstream key stays inside LiteLLM.
-            local["headers"] = {"Authorization": f"Bearer {master_key}"}
+            local["headers"] = {"Authorization": f"!{bearer_command}"}
         for original in provider["models"]:
             model = copy.deepcopy(original)
             # Router-only LiteLLM metadata is not part of Pi's model schema.
@@ -725,8 +797,9 @@ def generate_client_providers(
     return {"providers": providers}
 
 
-def merge_client_models(path: Path, generated: dict[str, Any]) -> tuple[bool, Path | None]:
-    if path.exists():
+def render_merged_client_models(path: Path, generated: dict[str, Any]) -> str:
+    if path.exists() or path.is_symlink():
+        _reject_unsafe_existing_file(path, "client models.json")
         current = load_json(path, "client models.json")
         if not isinstance(current, dict) or not isinstance(current.get("providers"), dict):
             raise ConfigError(f"client models.json has no providers object: {path}")
@@ -737,7 +810,10 @@ def merge_client_models(path: Path, generated: dict[str, Any]) -> tuple[bool, Pa
         updated["providers"].pop(provider_id, None)
     for provider_id, provider in generated["providers"].items():
         updated["providers"][provider_id] = provider
-    rendered = json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
+    return json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
+
+
+def write_rendered_client_models(path: Path, rendered: str) -> tuple[bool, Path | None]:
     old = path.read_text(encoding="utf-8") if path.exists() else None
     if old == rendered:
         _reject_unsafe_existing_file(path, "client models.json")
@@ -755,6 +831,17 @@ def merge_client_models(path: Path, generated: dict[str, Any]) -> tuple[bool, Pa
         restrict_windows_file(path)
     validate_private_file(path, "client models.json")
     return True, backup
+
+
+def merge_client_models(path: Path, generated: dict[str, Any]) -> tuple[bool, Path | None]:
+    return write_rendered_client_models(path, render_merged_client_models(path, generated))
+
+
+def canonical_client_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_symlink():
+        raise ConfigError(f"client configuration must not be a symlink: {expanded}")
+    return expanded.parent.resolve() / expanded.name
 
 
 def auto_rotator_candidates() -> list[Path]:
@@ -787,7 +874,7 @@ def write_generated_state(
 ) -> None:
     ensure_private_directory(state_dir)
     config = generate_litellm_config(catalog, secrets_doc, max_fallbacks, cooldown_seconds)
-    generated_clients = generate_client_providers(catalog, secrets_doc["masterKey"], host, port)
+    generated_clients = generate_client_providers(catalog, host, port, state_dir)
     runtime = validate_runtime(
         {
             "schemaVersion": SCHEMA_VERSION,
@@ -1041,8 +1128,8 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
                     raise
                 print(
                     "WARNING: existing secrets cannot be parsed or validated; "
-                    "generated a new local master key. Reconfigure every client "
-                    "models.json before use.",
+                    "generated a new local master key. Generated command-backed clients "
+                    "remain valid; reconfigure any client that stored a literal key.",
                     file=sys.stderr,
                 )
 
@@ -1097,7 +1184,8 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             except ConfigError:
                 print(
                     "WARNING: existing local master key is invalid; generated a new one. "
-                    "Reconfigure every client models.json before use.",
+                    "Generated command-backed clients remain valid; reconfigure any "
+                    "client that stored a literal key.",
                     file=sys.stderr,
                 )
             else:
@@ -1131,9 +1219,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     if "auto" in client_values:
         client_paths.extend(path for path in auto_client_candidates() if path.exists())
     client_paths.extend(
-        Path(value).expanduser().resolve() for value in client_values if value != "auto"
+        canonical_client_path(Path(value)) for value in client_values if value != "auto"
     )
-    generated = generate_client_providers(catalog, secrets_doc["masterKey"], args.host, port)
+    generated = generate_client_providers(catalog, args.host, port, state_dir)
     seen: set[Path] = set()
     for path in client_paths:
         if path in seen:
@@ -1174,15 +1262,15 @@ def cmd_configure_clients(args: argparse.Namespace) -> int:
     catalog, secrets_doc, runtime = load_state(args.state_dir, args.catalog)
     generated = generate_client_providers(
         catalog,
-        secrets_doc["masterKey"],
         str(runtime.get("host", DEFAULT_HOST)),
         int(runtime.get("port", DEFAULT_PORT)),
+        args.state_dir,
     )
     values = args.client or ["auto"]
     paths: list[Path] = []
     if "auto" in values:
         paths.extend(p for p in auto_client_candidates() if p.exists())
-    paths.extend(Path(v).expanduser().resolve() for v in values if v != "auto")
+    paths.extend(canonical_client_path(Path(v)) for v in values if v != "auto")
     if not paths:
         raise ConfigError("no client models.json files found")
     for path in dict.fromkeys(paths):
@@ -1191,6 +1279,240 @@ def cmd_configure_clients(args: argparse.Namespace) -> int:
         print(f"{'Updated' if changed else 'Already current'}: {path}")
         if backup:
             print(f"Backup: {backup}")
+    return 0
+
+
+def write_private_client_file(path: Path, rendered: str, label: str) -> tuple[bool, Path | None]:
+    ensure_private_directory(path.parent)
+    old: str | None = None
+    if path.exists() or path.is_symlink():
+        _reject_unsafe_existing_file(path, label)
+        if path.stat().st_size > MAX_JSON_BYTES:
+            raise ConfigError(f"{label} is too large: {path}")
+        old = path.read_text(encoding="utf-8-sig")
+    if old == rendered:
+        if os.name != "nt":
+            path.chmod(0o600)
+        else:
+            restrict_windows_file(path)
+        validate_private_file(path, label)
+        return False, None
+    backup = backup_file(path)
+    atomic_write(path, rendered, private=True)
+    return True, backup
+
+
+def render_claude_code_settings(
+    path: Path,
+    token_helper: str,
+    base_url: str,
+    model: str,
+) -> str:
+    if path.exists() or path.is_symlink():
+        _reject_unsafe_existing_file(path, "Claude Code settings")
+        current = load_json(path, "Claude Code settings")
+        if not isinstance(current, dict):
+            raise ConfigError(f"Claude Code settings must be a JSON object: {path}")
+    else:
+        current = {}
+    updated = copy.deepcopy(current)
+    env = updated.get("env", {})
+    if not isinstance(env, dict):
+        raise ConfigError(f"Claude Code settings env must be an object: {path}")
+    env = copy.deepcopy(env)
+    # apiKeyHelper supplies both Authorization and x-api-key. Remove persisted
+    # credential variables from this managed settings block to prevent conflicts.
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("ANTHROPIC_AUTH_TOKEN", None)
+    env.update(
+        {
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": DEFAULT_CLAUDE_OPUS_MODEL,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": DEFAULT_CLAUDE_SONNET_MODEL,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": DEFAULT_CLAUDE_HAIKU_MODEL,
+        }
+    )
+    updated["env"] = env
+    updated["apiKeyHelper"] = token_helper
+    return json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
+
+
+def merge_claude_code_settings(
+    path: Path,
+    token_helper: str,
+    base_url: str,
+    model: str,
+) -> tuple[bool, Path | None]:
+    rendered = render_claude_code_settings(path, token_helper, base_url, model)
+    return write_private_client_file(path, rendered, "Claude Code settings")
+
+
+def toml_string(value: str) -> str:
+    if "\x00" in value:
+        raise ConfigError("TOML string contains NUL")
+    return json.dumps(value, ensure_ascii=False)
+
+
+def generate_codex_profile(state_dir: Path, base_url: str, model: str) -> str:
+    # Codex 0.134.0+ loads ~/.codex/<name>.config.toml via --profile <name>.
+    executable, prefix_args = router_wrapper_invocation(state_dir)
+    auth_args = [*prefix_args, "client-token"]
+    args_toml = ", ".join(toml_string(value) for value in auth_args)
+    return (
+        "# Managed by ICA LiteLLM Key Router. Use: codex --profile ica-router\n"
+        f"model = {toml_string(model)}\n"
+        'model_provider = "ica-router"\n'
+        "model_context_window = 1000000\n\n"
+        "[model_providers.ica-router]\n"
+        'name = "ICA local key router"\n'
+        f"base_url = {toml_string(base_url)}\n"
+        'wire_api = "responses"\n'
+        "request_max_retries = 0\n"
+        "stream_max_retries = 0\n\n"
+        "[model_providers.ica-router.auth]\n"
+        f"command = {toml_string(executable)}\n"
+        f"args = [{args_toml}]\n"
+        "timeout_ms = 5000\n"
+        "refresh_interval_ms = 300000\n"
+    )
+
+
+def cmd_client_token(args: argparse.Namespace) -> int:
+    document = load_private_json(args.state_dir / "secrets.json", "secrets")
+    token = validate_master_key(document.get("masterKey") if isinstance(document, dict) else None)
+    prefix = "Bearer " if args.bearer else ""
+    sys.stdout.write(prefix + token + "\n")
+    return 0
+
+
+def cmd_configure_harnesses(args: argparse.Namespace) -> int:
+    catalog, _secrets_doc, runtime = load_state(args.state_dir, args.catalog)
+    wrapper = args.state_dir.parent / ("ica-router.ps1" if os.name == "nt" else "ica-router")
+    if not wrapper.is_file() or (os.name != "nt" and not os.access(wrapper, os.X_OK)):
+        raise ConfigError(f"router wrapper is unavailable: {wrapper}")
+
+    explicit = any(
+        (
+            args.all,
+            args.pi,
+            args.prime,
+            args.claude_code,
+            args.codex,
+            args.pi_models is not None,
+            args.prime_models is not None,
+            args.claude_settings is not None,
+            args.codex_profile is not None,
+        )
+    )
+    configure_pi = args.pi or args.pi_models is not None or args.all or not explicit
+    configure_prime = args.prime or args.prime_models is not None
+    configure_claude = (
+        args.claude_code or args.claude_settings is not None or args.all or not explicit
+    )
+    configure_codex = args.codex or args.codex_profile is not None or args.all or not explicit
+    host = str(runtime.get("host", DEFAULT_HOST))
+    port = int(runtime.get("port", DEFAULT_PORT))
+
+    # Build and validate every selected output before changing the first file.
+    # Each plan is label, path, rendered text, writer kind, and file label.
+    plans: list[tuple[str, Path, str, str, str]] = []
+    if configure_pi or configure_prime:
+        generated = generate_client_providers(catalog, host, port, args.state_dir)
+        if configure_pi:
+            path = canonical_client_path(
+                args.pi_models or Path.home() / ".pi/agent/models.json"
+            )
+            plans.append(
+                ("Pi", path, render_merged_client_models(path, generated), "pi", "client models.json")
+            )
+        if configure_prime:
+            path = canonical_client_path(
+                args.prime_models or Path.home() / ".prime/agent/models.json"
+            )
+            plans.append(
+                (
+                    "prime-agent",
+                    path,
+                    render_merged_client_models(path, generated),
+                    "pi",
+                    "client models.json",
+                )
+            )
+    if configure_claude:
+        path = canonical_client_path(
+            args.claude_settings or Path.home() / ".claude/settings.json"
+        )
+        rendered = render_claude_code_settings(
+            path,
+            client_token_command(args.state_dir),
+            local_base_url("anthropic-messages", host, port),
+            args.claude_model,
+        )
+        plans.append(("Claude Code", path, rendered, "private", "Claude Code settings"))
+    if configure_codex:
+        path = canonical_client_path(
+            args.codex_profile or Path.home() / ".codex/ica-router.config.toml"
+        )
+        rendered = generate_codex_profile(
+            args.state_dir,
+            local_base_url("openai-responses", host, port),
+            args.codex_model,
+        )
+        plans.append(("Codex", path, rendered, "private", "Codex ICA router profile"))
+
+    paths = [plan[1] for plan in plans]
+    if len(set(paths)) != len(paths):
+        raise ConfigError("selected harness configuration paths must be distinct")
+    snapshots: dict[Path, tuple[bool, str | None, int | None]] = {}
+    for _label, path, _rendered, _kind, file_label in plans:
+        if path.exists() or path.is_symlink():
+            _reject_unsafe_existing_file(path, file_label)
+            snapshots[path] = (
+                True,
+                path.read_text(encoding="utf-8-sig"),
+                stat.S_IMODE(path.stat().st_mode) if os.name != "nt" else None,
+            )
+        else:
+            snapshots[path] = (False, None, None)
+
+    results: list[tuple[str, Path, bool, Path | None]] = []
+    applied: list[Path] = []
+    try:
+        for label, path, rendered, kind, file_label in plans:
+            if kind == "pi":
+                changed, backup = write_rendered_client_models(path, rendered)
+            else:
+                changed, backup = write_private_client_file(path, rendered, file_label)
+            applied.append(path)
+            results.append((label, path, changed, backup))
+    except BaseException:
+        rollback_errors: list[str] = []
+        for path in reversed(applied):
+            existed, old_text, old_mode = snapshots[path]
+            try:
+                if existed and old_text is not None:
+                    atomic_write(path, old_text, private=True)
+                    if os.name != "nt" and old_mode is not None:
+                        path.chmod(old_mode)
+                    elif os.name == "nt":
+                        restrict_windows_file(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except BaseException as rollback_exc:
+                rollback_errors.append(f"{path}: {rollback_exc}")
+        if rollback_errors:
+            eprint("WARNING: harness configuration rollback was incomplete: " + "; ".join(rollback_errors))
+        raise
+
+    for label, path, changed, backup in results:
+        print(f"{label}: {'updated' if changed else 'already current'}: {path}")
+        if backup:
+            print(f"Backup: {backup}")
+    if configure_claude:
+        print("Claude Code shell ANTHROPIC_API_KEY/AUTH_TOKEN values must be unset to avoid conflicts.")
+    if configure_codex:
+        print("Use Codex 0.134.0 or later with: codex --profile ica-router")
     return 0
 
 
@@ -1608,19 +1930,87 @@ def serve_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str], 
     return cmd, env, runtime
 
 
-def cmd_start(args: argparse.Namespace) -> int:
+def router_start_context(
+    args: argparse.Namespace,
+) -> tuple[list[str], dict[str, str], str, int, Path, str, str]:
+    litellm_cmd, child_env, runtime = serve_command(args)
+    host = str(runtime["host"])
+    port = int(runtime["port"])
+    config_path = args.state_dir / "config.yaml"
+    config = load_private_json(config_path, "generated LiteLLM config")
+    try:
+        expected_alias = str(config["model_list"][0]["model_name"])
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ConfigError("generated LiteLLM config has no model aliases") from exc
+    config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    return (
+        litellm_cmd,
+        child_env,
+        host,
+        port,
+        config_path,
+        config_sha256,
+        expected_alias,
+    )
+
+
+def prepare_router_log(state_dir: Path) -> Path:
+    ensure_private_directory(state_dir)
+    log_path = state_dir / "router.log"
+    if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
+        rotated = state_dir / "router.log.1"
+        _reject_unsafe_existing_file(log_path, "router log")
+        if rotated.exists():
+            _reject_unsafe_existing_file(rotated, "rotated router log")
+            rotated.unlink()
+        os.replace(log_path, rotated)
+    if not log_path.exists():
+        atomic_write(log_path, "", private=True)
+    else:
+        validate_private_file(log_path, "router log")
+    if os.name != "nt":
+        log_path.chmod(0o600)
+    restrict_windows_file(log_path)
+    return log_path
+
+
+def router_run_document(
+    args: argparse.Namespace,
+    pid: int,
+    start_token: str,
+    litellm_cmd: list[str],
+    config_path: Path,
+    config_sha256: str,
+    host: str,
+    port: int,
+) -> dict[str, Any]:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "pid": pid,
+        "startToken": start_token,
+        "executable": str(Path(litellm_cmd[0]).resolve()),
+        "configPath": str(config_path.resolve()),
+        "configSha256": config_sha256,
+        "catalogPath": str(args.catalog),
+        "venvPath": str(args.venv),
+        "host": host,
+        "port": port,
+        "startedAt": int(time.time()),
+    }
+
+
+def cmd_start_worker(args: argparse.Namespace) -> int:
     run_path = args.state_dir / "run.json"
     with command_lock(args.state_dir):
-        litellm_cmd, child_env, runtime = serve_command(args)  # validate before detaching
-        host = str(runtime["host"])
-        port = int(runtime["port"])
-        config_path = args.state_dir / "config.yaml"
-        config = load_private_json(config_path, "generated LiteLLM config")
-        try:
-            expected_alias = str(config["model_list"][0]["model_name"])
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ConfigError("generated LiteLLM config has no model aliases") from exc
-        config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        (
+            litellm_cmd,
+            child_env,
+            host,
+            port,
+            config_path,
+            config_sha256,
+            expected_alias,
+        ) = router_start_context(args)
         master_key = child_env[MASTER_ENV]
 
         existing = load_run_state(run_path)
@@ -1639,22 +2029,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         if port_is_open(host, port):
             raise ConfigError(f"local port is already occupied: {host}:{port}")
 
-        ensure_private_directory(args.state_dir)
-        log_path = args.state_dir / "router.log"
-        if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
-            rotated = args.state_dir / "router.log.1"
-            _reject_unsafe_existing_file(log_path, "router log")
-            if rotated.exists():
-                _reject_unsafe_existing_file(rotated, "rotated router log")
-                rotated.unlink()
-            os.replace(log_path, rotated)
-        if not log_path.exists():
-            atomic_write(log_path, "", private=True)
-        else:
-            validate_private_file(log_path, "router log")
-        if os.name != "nt":
-            log_path.chmod(0o600)
-        restrict_windows_file(log_path)
+        log_path = prepare_router_log(args.state_dir)
 
         command = litellm_cmd
         with log_path.open("ab", buffering=0) as log:
@@ -1680,19 +2055,16 @@ def cmd_start(args: argparse.Namespace) -> int:
                 start_token = process_start_token(child.pid)
             if start_token is None:
                 raise ConfigError(f"router exited before process identity could be recorded; inspect private log: {log_path}")
-            run_document: dict[str, Any] = {
-                "schemaVersion": SCHEMA_VERSION,
-                "pid": child.pid,
-                "startToken": start_token,
-                "executable": str(Path(litellm_cmd[0]).resolve()),
-                "configPath": str(config_path.resolve()),
-                "configSha256": config_sha256,
-                "catalogPath": str(args.catalog),
-                "venvPath": str(args.venv),
-                "host": host,
-                "port": port,
-                "startedAt": int(time.time()),
-            }
+            run_document = router_run_document(
+                args,
+                child.pid,
+                start_token,
+                litellm_cmd,
+                config_path,
+                config_sha256,
+                host,
+                port,
+            )
             atomic_write(run_path, json.dumps(run_document, indent=2) + "\n", private=True)
             restrict_windows_file(run_path)
 
@@ -1731,7 +2103,111 @@ def cmd_start(args: argparse.Namespace) -> int:
             raise
 
 
-def cmd_stop(args: argparse.Namespace) -> int:
+def cmd_run_foreground(args: argparse.Namespace) -> int:
+    if os.name == "nt":
+        raise ConfigError("run-foreground is supported only on Unix-like systems")
+    run_path = args.state_dir / "run.json"
+    with command_lock(args.state_dir):
+        (
+            litellm_cmd,
+            child_env,
+            host,
+            port,
+            config_path,
+            config_sha256,
+            _expected_alias,
+        ) = router_start_context(args)
+        existing = load_run_state(run_path)
+        if existing is not None:
+            matched, reason = process_matches_run_state(existing)
+            if matched:
+                raise ConfigError(f"router is already running with PID {existing['pid']}")
+            if process_alive(int(existing["pid"])):
+                raise ConfigError(
+                    f"stale run state; refusing live PID {existing['pid']}: {reason}"
+                )
+            run_path.unlink(missing_ok=True)
+        if port_is_open(host, port):
+            raise ConfigError(f"local port is already occupied: {host}:{port}")
+
+        log_path = prepare_router_log(args.state_dir)
+        if os.getpgrp() != os.getpid():
+            os.setsid()
+        pid = os.getpid()
+        start_token = process_start_token(pid)
+        if start_token is None:
+            raise ConfigError("could not record foreground router process identity")
+        run_document = router_run_document(
+            args,
+            pid,
+            start_token,
+            litellm_cmd,
+            config_path,
+            config_sha256,
+            host,
+            port,
+        )
+        atomic_write(run_path, json.dumps(run_document, indent=2) + "\n", private=True)
+        restrict_windows_file(run_path)
+
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            with open(os.devnull, "rb", buffering=0) as null_in, log_path.open(
+                "ab", buffering=0
+            ) as log:
+                os.dup2(null_in.fileno(), 0)
+                os.dup2(log.fileno(), 1)
+                os.dup2(log.fileno(), 2)
+            os.execve(litellm_cmd[0], litellm_cmd, child_env)
+        except BaseException:
+            run_path.unlink(missing_ok=True)
+            raise
+    return 0
+
+
+def cmd_wait_ready(args: argparse.Namespace) -> int:
+    (
+        _litellm_cmd,
+        child_env,
+        host,
+        port,
+        _config_path,
+        config_sha256,
+        expected_alias,
+    ) = router_start_context(args)
+    master_key = child_env[MASTER_ENV]
+    run_path = args.state_dir / "run.json"
+    deadline = time.monotonic() + args.start_timeout
+    last_reason = "run state is not available"
+    while time.monotonic() < deadline:
+        try:
+            document = load_run_state(run_path)
+            if document is None:
+                last_reason = "run state is not available"
+            elif document.get("configSha256") != config_sha256:
+                last_reason = "run state uses an older configuration"
+            else:
+                matched, last_reason = process_matches_run_state(document)
+                if (
+                    matched
+                    and wait_for_liveness(host, port, 0.5)
+                    and wait_for_authenticated_models(host, port, master_key, expected_alias, 1.0)
+                ):
+                    print(f"Router ready: PID {document['pid']}, http://{host}:{port}")
+                    return 0
+                if not process_alive(int(document["pid"])):
+                    last_reason = "router process exited"
+        except ConfigError as exc:
+            last_reason = str(exc)
+        time.sleep(0.15)
+    raise ConfigError(
+        f"router readiness timed out on {host}:{port}: {last_reason}; "
+        f"inspect private log: {args.state_dir / 'router.log'}"
+    )
+
+
+def cmd_stop_worker(args: argparse.Namespace) -> int:
     run_path = args.state_dir / "run.json"
     with command_lock(args.state_dir):
         document = load_run_state(run_path)
@@ -1814,6 +2290,191 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def systemd_user_unit_path() -> Path:
+    config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_root / "systemd" / "user" / SYSTEMD_UNIT_NAME
+
+
+def systemd_quote(value: str) -> str:
+    if "\x00" in value or "\n" in value or "\r" in value:
+        raise ConfigError("systemd command argument contains a control character")
+    # Percent is a systemd specifier even inside quotes; double it for a literal.
+    return json.dumps(value.replace("%", "%%"))
+
+
+def generate_systemd_user_unit(state_dir: Path) -> str:
+    if not sys.platform.startswith("linux"):
+        raise ConfigError("systemd user service is supported only on Linux")
+    wrapper = state_dir.parent / "ica-router"
+    wrapper_arg = systemd_quote(str(wrapper))
+    return (
+        f"{SYSTEMD_UNIT_MARKER}\n"
+        "[Unit]\n"
+        "Description=ICA LiteLLM Key Router\n"
+        "Wants=network-online.target\n"
+        "After=network-online.target\n\n"
+        "[Service]\n"
+        "Type=exec\n"
+        "UMask=0077\n"
+        f"ExecStart={wrapper_arg} run-foreground\n"
+        f"ExecStartPost={wrapper_arg} wait-ready --start-timeout 120\n"
+        f"ExecStop={wrapper_arg} stop-worker\n"
+        "Restart=on-failure\n"
+        "RestartSec=5s\n"
+        "TimeoutStartSec=150s\n"
+        "TimeoutStopSec=30s\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def managed_systemd_user_unit(state_dir: Path) -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    unit_path = systemd_user_unit_path()
+    if not unit_path.exists() and not unit_path.is_symlink():
+        return False
+    _reject_unsafe_existing_file(unit_path, "systemd user unit")
+    content = unit_path.read_text(encoding="utf-8")
+    return SYSTEMD_UNIT_MARKER in content and content == generate_systemd_user_unit(state_dir)
+
+
+def run_systemctl(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    systemctl = posix_system_command("systemctl")
+    result = subprocess.run(
+        [systemctl, "--user", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ConfigError(
+            f"systemctl --user {' '.join(arguments)} failed"
+            + (f": {detail}" if detail else "")
+        )
+    return result
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    if managed_systemd_user_unit(args.state_dir):
+        run_systemctl("start", SYSTEMD_UNIT_NAME)
+        return cmd_wait_ready(args)
+    return cmd_start_worker(args)
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    if managed_systemd_user_unit(args.state_dir):
+        run_systemctl("stop", SYSTEMD_UNIT_NAME)
+        if run_systemctl("is-active", SYSTEMD_UNIT_NAME, check=False).returncode == 0:
+            raise ConfigError(f"systemd user service did not stop: {SYSTEMD_UNIT_NAME}")
+        print(f"Router stopped through systemd: {SYSTEMD_UNIT_NAME}")
+        return 0
+    return cmd_stop_worker(args)
+
+
+def cmd_install_systemd_user(args: argparse.Namespace) -> int:
+    if not sys.platform.startswith("linux"):
+        raise ConfigError("systemd user service is supported only on Linux")
+    wrapper = args.state_dir.parent / "ica-router"
+    if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+        raise ConfigError(f"router wrapper is unavailable: {wrapper}")
+    # Verify generated state before replacing any current lifecycle owner.
+    load_state(args.state_dir, args.catalog)
+    unit_path = systemd_user_unit_path()
+    rendered = generate_systemd_user_unit(args.state_dir)
+    prior_unit: str | None = None
+    if unit_path.exists() or unit_path.is_symlink():
+        _reject_unsafe_existing_file(unit_path, "systemd user unit")
+        prior_unit = unit_path.read_text(encoding="utf-8")
+        if SYSTEMD_UNIT_MARKER not in prior_unit:
+            raise ConfigError(f"refusing to replace an unmanaged systemd unit: {unit_path}")
+    prior_enabled = run_systemctl("is-enabled", SYSTEMD_UNIT_NAME, check=False).returncode == 0
+    prior_active = run_systemctl("is-active", SYSTEMD_UNIT_NAME, check=False).returncode == 0
+    prior_run = load_run_state(args.state_dir / "run.json")
+    prior_router_running = False
+    if prior_run is not None:
+        prior_router_running, _reason = process_matches_run_state(prior_run)
+    if (
+        prior_unit == rendered
+        and prior_enabled
+        and prior_active
+        and cmd_status(args) == 0
+    ):
+        print(f"systemd user service already current and active: {unit_path}")
+        return 0
+
+    backup: Path | None = None
+    changed = False
+    try:
+        if prior_unit is not None:
+            stopped = run_systemctl("stop", SYSTEMD_UNIT_NAME, check=False)
+            if prior_active and stopped.returncode != 0:
+                detail = (stopped.stderr or stopped.stdout).strip()
+                raise ConfigError(
+                    "could not stop existing systemd user service"
+                    + (f": {detail}" if detail else "")
+                )
+        # Stop a manually started router after stopping any older managed unit.
+        cmd_stop_worker(args)
+        changed, backup = write_private_client_file(unit_path, rendered, "systemd user unit")
+        run_systemctl("daemon-reload")
+        run_systemctl("enable", "--now", SYSTEMD_UNIT_NAME)
+        active = run_systemctl("is-active", SYSTEMD_UNIT_NAME)
+        if active.stdout.strip() != "active":
+            raise ConfigError(f"systemd user unit did not become active: {SYSTEMD_UNIT_NAME}")
+    except BaseException:
+        rollback_errors: list[str] = []
+        try:
+            run_systemctl("disable", "--now", SYSTEMD_UNIT_NAME, check=False)
+            if prior_unit is None:
+                unit_path.unlink(missing_ok=True)
+            else:
+                atomic_write(unit_path, prior_unit, private=True)
+            run_systemctl("daemon-reload")
+            if prior_enabled:
+                run_systemctl("enable", SYSTEMD_UNIT_NAME)
+            else:
+                run_systemctl("disable", SYSTEMD_UNIT_NAME, check=False)
+            if prior_active:
+                run_systemctl("start", SYSTEMD_UNIT_NAME)
+            elif prior_router_running:
+                cmd_start_worker(args)
+        except BaseException as rollback_exc:
+            rollback_errors.append(str(rollback_exc))
+        if rollback_errors:
+            eprint("WARNING: systemd rollback was incomplete: " + "; ".join(rollback_errors))
+        raise
+
+    print(f"systemd user service {'installed' if changed else 'already current'}: {unit_path}")
+    if backup:
+        print(f"Backup: {backup}")
+    print("Autostart is enabled for user login; boot-without-login additionally requires user lingering.")
+    return 0
+
+
+def cmd_uninstall_systemd_user(args: argparse.Namespace) -> int:
+    if not sys.platform.startswith("linux"):
+        raise ConfigError("systemd user service is supported only on Linux")
+    unit_path = systemd_user_unit_path()
+    if unit_path.exists() or unit_path.is_symlink():
+        _reject_unsafe_existing_file(unit_path, "systemd user unit")
+        if SYSTEMD_UNIT_MARKER not in unit_path.read_text(encoding="utf-8"):
+            raise ConfigError(f"refusing to remove an unmanaged systemd unit: {unit_path}")
+    active = run_systemctl("is-active", SYSTEMD_UNIT_NAME, check=False).returncode == 0
+    disabled = run_systemctl("disable", "--now", SYSTEMD_UNIT_NAME, check=False)
+    if active and disabled.returncode != 0:
+        detail = (disabled.stderr or disabled.stdout).strip()
+        raise ConfigError(
+            f"could not stop and disable systemd user service"
+            + (f": {detail}" if detail else "")
+        )
+    unit_path.unlink(missing_ok=True)
+    run_systemctl("daemon-reload")
+    print(f"Removed systemd user service: {SYSTEMD_UNIT_NAME}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=default_state_dir())
@@ -1852,18 +2513,61 @@ def build_parser() -> argparse.ArgumentParser:
     clients.add_argument("--client", action="append", default=[])
     clients.set_defaults(func=cmd_configure_clients)
 
+    harnesses = sub.add_parser(
+        "configure-harnesses",
+        help="configure Pi, Claude Code, and a separate Codex router profile",
+    )
+    harnesses.add_argument("--all", action="store_true", help="configure Pi, Claude Code, and Codex")
+    harnesses.add_argument("--pi", action="store_true")
+    harnesses.add_argument("--prime", action="store_true")
+    harnesses.add_argument("--claude-code", action="store_true")
+    harnesses.add_argument("--codex", action="store_true")
+    harnesses.add_argument("--pi-models", type=Path, default=None)
+    harnesses.add_argument("--prime-models", type=Path, default=None)
+    harnesses.add_argument("--claude-settings", type=Path, default=None)
+    harnesses.add_argument("--codex-profile", type=Path, default=None)
+    harnesses.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL)
+    harnesses.add_argument("--codex-model", default=DEFAULT_CODEX_MODEL)
+    harnesses.set_defaults(func=cmd_configure_harnesses)
+
+    token = sub.add_parser("client-token", help="print the local router credential for a client helper")
+    token.add_argument("--bearer", action="store_true", help="prefix the credential with 'Bearer '")
+    token.set_defaults(func=cmd_client_token)
+
     start = sub.add_parser("start", help="start LiteLLM in the background")
     start.add_argument("--start-timeout", type=float, default=120.0)
     start.set_defaults(func=cmd_start)
 
-    stop = sub.add_parser("stop", help="stop the background router")
+    foreground = sub.add_parser(
+        "run-foreground", help="exec LiteLLM in the foreground for a service manager"
+    )
+    foreground.set_defaults(func=cmd_run_foreground)
+
+    ready = sub.add_parser("wait-ready", help="wait for authenticated router readiness")
+    ready.add_argument("--start-timeout", type=float, default=120.0)
+    ready.set_defaults(func=cmd_wait_ready)
+
+    stop = sub.add_parser("stop", help="stop the background or service-managed router")
     stop.set_defaults(func=cmd_stop)
+
+    stop_worker = sub.add_parser("stop-worker", help=argparse.SUPPRESS)
+    stop_worker.set_defaults(func=cmd_stop_worker)
 
     status = sub.add_parser("status", help="show background router status")
     status.set_defaults(func=cmd_status)
 
     doctor = sub.add_parser("doctor", help="validate files without calling providers")
     doctor.set_defaults(func=cmd_doctor)
+
+    systemd_install = sub.add_parser(
+        "install-systemd-user", help="install and start a systemd user service on Linux"
+    )
+    systemd_install.set_defaults(func=cmd_install_systemd_user)
+
+    systemd_remove = sub.add_parser(
+        "uninstall-systemd-user", help="disable and remove the managed systemd user service"
+    )
+    systemd_remove.set_defaults(func=cmd_uninstall_systemd_user)
     return parser
 
 
@@ -1886,12 +2590,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-fallbacks must be 0-20")
     if getattr(args, "cooldown_seconds", None) is not None and not (1 <= args.cooldown_seconds <= 86400):
         parser.error("--cooldown-seconds must be 1-86400")
+    if getattr(args, "start_timeout", None) is not None and args.start_timeout <= 0:
+        parser.error("--start-timeout must be positive")
     try:
         if args.command in {"bootstrap", "generate", "configure-clients"}:
             with command_lock(args.state_dir):
                 require_router_stopped_for_mutation(args.state_dir)
                 return int(args.func(args))
-        if args.command == "doctor":
+        if args.command in {"doctor", "configure-harnesses"}:
             with command_lock(args.state_dir):
                 return int(args.func(args))
         return int(args.func(args))

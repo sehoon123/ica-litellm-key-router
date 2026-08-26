@@ -6,7 +6,7 @@ export PATH
 
 APP_NAME="ica-litellm-key-router"
 REPO_SLUG="sehoon123/ica-litellm-key-router"
-SOURCE_REF="${ICA_ROUTER_REF:-v0.1.1}"
+SOURCE_REF="${ICA_ROUTER_REF:-v0.2.0}"
 LITELLM_VERSION="1.98.0"
 PYTHON_VERSION="3.12.13"
 UV_VERSION="0.12.2"
@@ -29,6 +29,11 @@ RELEASE_PREEXISTED=0
 INSTALL_LOCK_HELD=0
 FORCE_INSTALL=0
 REPLACE_KEYS=0
+SYSTEMD_USER=0
+SYSTEMD_UNIT_EXISTED=0
+SYSTEMD_WAS_ENABLED=0
+SYSTEMD_WAS_ACTIVE=0
+OLD_ROUTER_WAS_RUNNING=0
 MODEL_CLIENTS=()
 
 say() { printf '%s\n' "$*"; }
@@ -49,6 +54,7 @@ Options:
   --models-json PATH   Create or merge a custom models.json (repeatable).
   --replace-keys       Prompt for all API keys again, then restart the router.
   --force-install      Reinstall/update even when a valid installation exists.
+  --systemd-user       Enable and start the managed systemd user service.
   -h, --help           Show this help.
 EOF
 }
@@ -74,6 +80,10 @@ while (($#)); do
       ;;
     --force-install)
       FORCE_INSTALL=1
+      shift
+      ;;
+    --systemd-user)
+      SYSTEMD_USER=1
       shift
       ;;
     -h|--help)
@@ -147,11 +157,31 @@ configure_requested_clients() {
 print_models_hint() {
   if ((${#MODEL_CLIENTS[@]} == 0)); then
     say "Pi models.json was not modified."
-    say "  Easiest: $0 --pi-models"
-    say "  Or separately:"
-    say "    $WRAPPER stop"
-    say "    $WRAPPER configure-clients --client \"$HOME/.pi/agent/models.json\""
-    say "    $WRAPPER start"
+    say "  During install: $0 --pi-models"
+    say "  Or without stopping the router:"
+    say "    $WRAPPER configure-harnesses --pi"
+  fi
+}
+
+SYSTEMD_UNIT_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ica-litellm-key-router.service"
+if [[ -f "$SYSTEMD_UNIT_PATH" && ! -L "$SYSTEMD_UNIT_PATH" ]]; then
+  SYSTEMD_UNIT_EXISTED=1
+fi
+if [[ "$SYSTEMD_UNIT_EXISTED" == "1" && -x /usr/bin/systemctl ]]; then
+  if /usr/bin/systemctl --user is-enabled ica-litellm-key-router.service >/dev/null 2>&1; then
+    SYSTEMD_WAS_ENABLED=1
+    SYSTEMD_USER=1
+  fi
+  if /usr/bin/systemctl --user is-active ica-litellm-key-router.service >/dev/null 2>&1; then
+    SYSTEMD_WAS_ACTIVE=1
+  fi
+fi
+
+start_router() {
+  if [[ "$SYSTEMD_USER" == "1" ]]; then
+    "$WRAPPER" install-systemd-user
+  else
+    "$WRAPPER" start
   fi
 }
 
@@ -201,14 +231,14 @@ if [[ "$EXISTING_READY" == "1" ]]; then
       bootstrap_args+=(--no-configure-clients)
     fi
     if ! "$WRAPPER" "${bootstrap_args[@]}" </dev/tty; then
-      "$WRAPPER" start >/dev/null 2>&1 \
+      start_router >/dev/null 2>&1 \
         || say "WARNING: router could not be restarted after key replacement failed" >&2
       die "key replacement failed"
     fi
   elif ((${#MODEL_CLIENTS[@]} > 0)); then
     "$WRAPPER" stop >/dev/null 2>&1 || die "could not safely stop the existing router"
     if ! configure_requested_clients; then
-      "$WRAPPER" start >/dev/null 2>&1 \
+      start_router >/dev/null 2>&1 \
         || say "WARNING: router could not be restarted after client configuration failed" >&2
       die "client configuration failed"
     fi
@@ -217,7 +247,7 @@ if [[ "$EXISTING_READY" == "1" ]]; then
     say "Skipping installation and ensuring LiteLLM is running."
   fi
 
-  "$WRAPPER" start
+  start_router
   "$WRAPPER" status
   print_models_hint
   INSTALL_SUCCESS=1
@@ -461,8 +491,18 @@ elif [[ -x "$INSTALL_ROOT/.venv/bin/python" && -f "$INSTALL_ROOT/app/tools/route
   OLD_PY="$INSTALL_ROOT/.venv/bin/python"; OLD_CONTROL="$INSTALL_ROOT/app/tools/routerctl.py"
   OLD_CATALOG="$INSTALL_ROOT/app/catalog.json"; OLD_VENV="$INSTALL_ROOT/.venv"
 fi
+if [[ -n "$OLD_PY" && -f "$OLD_CONTROL" ]] \
+  && "$OLD_PY" "$OLD_CONTROL" --state-dir "$STATE_DIR" --catalog "$OLD_CATALOG" --venv "$OLD_VENV" status >/dev/null 2>&1; then
+  OLD_ROUTER_WAS_RUNNING=1
+fi
 ROLLBACK_DIR="$INSTALL_ROOT/.rollback-$$"
 mkdir -m 700 -- "$ROLLBACK_DIR" "$ROLLBACK_DIR/state" "$ROLLBACK_DIR/clients"
+if [[ "$SYSTEMD_UNIT_EXISTED" == "1" ]]; then
+  [[ -f "$SYSTEMD_UNIT_PATH" && ! -L "$SYSTEMD_UNIT_PATH" ]] \
+    || die "unsafe systemd user unit: $SYSTEMD_UNIT_PATH"
+  cp -- "$SYSTEMD_UNIT_PATH" "$ROLLBACK_DIR/systemd.unit"
+  chmod 600 "$ROLLBACK_DIR/systemd.unit"
+fi
 for name in secrets.json config.yaml client-models.generated.json runtime.json generation.json; do
   if [[ -e "$STATE_DIR/$name" || -L "$STATE_DIR/$name" ]]; then
     [[ -f "$STATE_DIR/$name" && ! -L "$STATE_DIR/$name" ]] || die "unsafe state file: $name"
@@ -509,8 +549,32 @@ rollback() {
       rm -f -- "$client_path"
     fi
   done
-  if [[ -n "$OLD_PY" && -f "$OLD_CONTROL" ]]; then
-    "$OLD_PY" "$OLD_CONTROL" --state-dir "$STATE_DIR" --catalog "$OLD_CATALOG" --venv "$OLD_VENV" start >/dev/null 2>&1       || say "WARNING: previous router could not be restarted automatically" >&2
+  if [[ ( "$SYSTEMD_USER" == "1" || "$SYSTEMD_UNIT_EXISTED" == "1" ) && -x /usr/bin/systemctl ]]; then
+    /usr/bin/systemctl --user disable --now ica-litellm-key-router.service >/dev/null 2>&1
+    if [[ "$SYSTEMD_UNIT_EXISTED" == "1" && -f "$ROLLBACK_DIR/systemd.unit" ]]; then
+      mkdir -p -- "$(dirname -- "$SYSTEMD_UNIT_PATH")"
+      cp -- "$ROLLBACK_DIR/systemd.unit" "$SYSTEMD_UNIT_PATH.rollback.$$"
+      chmod 600 "$SYSTEMD_UNIT_PATH.rollback.$$"
+      "$MANAGED_PYTHON" -I -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' \
+        "$SYSTEMD_UNIT_PATH.rollback.$$" "$SYSTEMD_UNIT_PATH"
+    else
+      rm -f -- "$SYSTEMD_UNIT_PATH"
+    fi
+    /usr/bin/systemctl --user daemon-reload >/dev/null 2>&1
+    if [[ "$SYSTEMD_WAS_ENABLED" == "1" ]]; then
+      /usr/bin/systemctl --user enable ica-litellm-key-router.service >/dev/null 2>&1 \
+        || say "WARNING: previous systemd enablement could not be restored" >&2
+    fi
+    if [[ "$SYSTEMD_WAS_ACTIVE" == "1" ]]; then
+      /usr/bin/systemctl --user start ica-litellm-key-router.service >/dev/null 2>&1 \
+        || say "WARNING: previous systemd router could not be restarted automatically" >&2
+    elif [[ "$OLD_ROUTER_WAS_RUNNING" == "1" && -n "$OLD_PY" && -f "$OLD_CONTROL" ]]; then
+      "$OLD_PY" "$OLD_CONTROL" --state-dir "$STATE_DIR" --catalog "$OLD_CATALOG" --venv "$OLD_VENV" start >/dev/null 2>&1 \
+        || say "WARNING: previous router could not be restarted automatically" >&2
+    fi
+  elif [[ "$OLD_ROUTER_WAS_RUNNING" == "1" && -n "$OLD_PY" && -f "$OLD_CONTROL" ]]; then
+    "$OLD_PY" "$OLD_CONTROL" --state-dir "$STATE_DIR" --catalog "$OLD_CATALOG" --venv "$OLD_VENV" start >/dev/null 2>&1 \
+      || say "WARNING: previous router could not be restarted automatically" >&2
   fi
   SWITCHED=0
   OLD_STOPPED=0
@@ -563,7 +627,7 @@ else
   if ! "${BOOTSTRAP[@]}"; then rollback; die "configuration failed; previous release restored"; fi
 fi
 if ! "$WRAPPER" doctor; then rollback; die "doctor failed; previous release restored"; fi
-if ! "$WRAPPER" start; then rollback; die "router failed to start; previous release restored"; fi
+if ! start_router; then rollback; die "router failed to start; previous release restored"; fi
 SWITCHED=0
 OLD_STOPPED=0
 
@@ -581,7 +645,12 @@ say "  Home:    $INSTALL_ROOT"
 say "  Release: $RELEASE_ID"
 say "  Status:  $WRAPPER status"
 say "  Stop:    $WRAPPER stop"
-say "  Start:   $WRAPPER start"
+if [[ "$SYSTEMD_USER" == "1" ]]; then
+  say "  Service: systemctl --user status ica-litellm-key-router.service"
+  say "  Start:   systemctl --user start ica-litellm-key-router.service"
+else
+  say "  Start:   $WRAPPER start"
+fi
 say "  Doctor:  $WRAPPER doctor"
 print_models_hint
 if ((${#MODEL_CLIENTS[@]} > 0)); then

@@ -393,6 +393,7 @@ jobs:
           import json
           from pathlib import Path
           import platform
+          import subprocess
           import sys
 
           root = Path(sys.argv[1])
@@ -414,6 +415,14 @@ jobs:
           assert len(aliases) == 12
           assert len(generated["providers"]) == 3
           assert len(config["model_list"]) == 24
+          assert subprocess.check_output(
+              [str(root / "ica-router"), "client-token"], text=True
+          ).strip() == secrets["masterKey"]
+          assert secrets["masterKey"] not in json.dumps(generated)
+          assert all(
+              provider["apiKey"].startswith("!") and "client-token" in provider["apiKey"]
+              for provider in generated["providers"].values()
+          )
           assert set(secrets["pools"]) == {"ica-services-essentials"}
           assert all(len(pool["keys"]) == 2 for pool in secrets["pools"].values())
           assert "keep-ci-dummy" in client["providers"]
@@ -549,7 +558,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
           # Exercise quoting through spaces and shell-significant path characters.
-          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router ci [path] $ tick`'
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
           $rotatorPath = Join-Path $env:RUNNER_TEMP 'key rotator [ci] $.json'
 
           function New-DummyValue([string]$label) {
@@ -620,16 +629,29 @@ jobs:
           $managedRunPath = Join-Path $state "run.json"
           $runTemplate = Get-Content -Raw -LiteralPath $managedRunPath | ConvertFrom-Json
           $runAcl = Get-Acl -LiteralPath $managedRunPath
-          $clientConfig = Get-Content -Raw (Join-Path $state "client-models.generated.json") | ConvertFrom-Json
+          $clientConfig = Get-Content -Raw -LiteralPath (Join-Path $state "client-models.generated.json") | ConvertFrom-Json
+          $secretsConfig = Get-Content -Raw -LiteralPath (Join-Path $state "secrets.json") | ConvertFrom-Json
+          $clientToken = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper client-token | Out-String).Trim()
+          if ($clientToken -ne $secretsConfig.masterKey) { throw "client-token did not return the local master key" }
+          $apiKeyCommand = $clientConfig.providers."ica-se-openai-router".apiKey
+          if (-not $apiKeyCommand.StartsWith("!")) { throw "Generated apiKey is not command-backed" }
+          $shellToken = (& $env:ComSpec /D /S /C $apiKeyCommand.Substring(1) | Out-String).Trim()
+          if ($shellToken -ne $secretsConfig.masterKey) { throw "Windows shell helper did not return the local master key" }
+          if ((Get-Content -Raw -LiteralPath (Join-Path $state "client-models.generated.json")).Contains($secretsConfig.masterKey)) {
+            throw "Generated client config persisted the local master key"
+          }
           $providerCount = @($clientConfig.providers.PSObject.Properties).Count
           $modelCount = 0
           foreach ($provider in $clientConfig.providers.PSObject.Properties.Value) {
             $modelCount += @($provider.models).Count
+            if (-not ($provider.apiKey -like "!*client-token*")) {
+              throw "Generated provider does not use command-backed client authentication"
+            }
           }
           if ($providerCount -ne 3) { throw "Expected 3 client providers, got $providerCount" }
           if ($modelCount -ne 12) { throw "Expected 12 model aliases, got $modelCount" }
 
-          $liteConfig = Get-Content -Raw (Join-Path $state "config.yaml") | ConvertFrom-Json
+          $liteConfig = Get-Content -Raw -LiteralPath (Join-Path $state "config.yaml") | ConvertFrom-Json
           if (@($liteConfig.model_list).Count -ne 24) {
             throw "Expected 24 deployments with two Services Essentials dummy keys"
           }
@@ -728,7 +750,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router ci [path] $ tick`'
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
           $wrapper = Join-Path $installRoot "ica-router.ps1"
           if (Test-Path $wrapper) {
             try {

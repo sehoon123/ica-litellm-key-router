@@ -5,7 +5,7 @@
 [![CI](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml/badge.svg)](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A local, authenticated [LiteLLM](https://github.com/BerriAI/litellm) proxy that spreads IBM ICA Services Essentials requests across authorized API keys. It keeps the native OpenAI Responses, Anthropic Messages, and Gemini `generateContent` interfaces used by Pi and prime-agent.
+A local, authenticated [LiteLLM](https://github.com/BerriAI/litellm) proxy that spreads IBM ICA Services Essentials requests across authorized API keys. It keeps the native OpenAI Responses, Anthropic Messages, and Gemini `generateContent` interfaces used by Pi, prime-agent, Codex, and Claude Code.
 
 The router does not issue credentials. Use only credentials and IBM services that you are authorized to use.
 
@@ -18,15 +18,17 @@ The router does not issue credentials. Use only credentials and IBM services tha
 - Cools down a deployment immediately after configured failure classes and retries eligible pre-output failures.
 - Sets provider SDK retries to zero and disables weighted failover.
 - Keeps raw upstream keys out of generated `config.yaml`.
-- Merges router providers into existing Pi or prime-agent `models.json` files without deleting unrelated providers.
+- Uses a command-backed client credential, so generated Pi, Claude Code, and Codex configuration does not persist another copy of the local master key.
+- Configures Pi/prime-agent, Claude Code, and a separate Codex profile without deleting unrelated settings or replacing Codex subscription defaults.
+- Can install a supervised, restart-on-failure `systemd --user` service on Linux.
 - Installs a private, exact runtime: Python `3.12.13`, `uv` `0.12.2`, and LiteLLM `1.98.0` from `uv.lock`.
 
 ## Architecture and trust boundary
 
 ```text
-Pi / prime-agent / curl
+Pi / prime-agent / Claude Code / Codex / curl
         |
-        | loopback HTTP + local master key
+        | command-fetched local master key + loopback HTTP
         v
 LiteLLM 1.98.0, one worker, 127.0.0.1:4000
         |
@@ -113,16 +115,22 @@ git clone https://github.com/sehoon123/ica-litellm-key-router.git
 cd ica-litellm-key-router
 ```
 
-If `~/.pi/agent/key-rotator.json` already contains the `ica-services-essentials` pool, the shortest non-interactive Pi setup imports it automatically:
+If `~/.pi/agent/key-rotator.json` already contains the `ica-services-essentials` pool, the shortest non-interactive setup imports it automatically and enables the supervised Linux user service:
 
 ```bash
-ICA_ROUTER_NON_INTERACTIVE=1 bash ./install-linux.sh --pi-models
+ICA_ROUTER_NON_INTERACTIVE=1 bash ./install-linux.sh --systemd-user
 ```
 
 On a fresh machine without an importable key-rotator file, run interactively and enter the authorized Services Essentials keys when prompted:
 
 ```bash
-bash ./install-linux.sh --pi-models
+bash ./install-linux.sh --systemd-user
+```
+
+Configure Pi, Claude Code, and a separate Codex profile. Generated clients fetch the local credential through `ica-router client-token`; they do not persist the token:
+
+```bash
+$HOME/.local/share/ica-litellm-key-router/ica-router configure-harnesses --all
 ```
 
 Verify the router and GPT-5.6 Sol through Pi:
@@ -135,15 +143,15 @@ pi --print \
   'Reply with exactly: OK'
 ```
 
-The installer preserves unrelated Pi providers and replaces only the three router-owned providers. The clone path is only the installation source; runtime state is stored under `$HOME/.local/share/ica-litellm-key-router`.
+With Codex 0.134.0 or later, use `codex --profile ica-router` for the generated `~/.codex/ica-router.config.toml` profile. Claude Code reads `~/.claude/settings.json`; unset shell-level `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` values that would conflict with `apiKeyHelper`. The installer preserves unrelated Pi providers, and the harness merger preserves unrelated Claude settings. The clone path is only the installation source; runtime state is stored under `$HOME/.local/share/ica-litellm-key-router`.
 
 ## Verify a release before installation
 
-For `v0.1.1`, the runtime source asset is:
+For `v0.2.0`, the runtime source asset is:
 
 ```text
-ica-litellm-key-router-v0.1.1.zip
-ica-litellm-key-router-v0.1.1.zip.sha256
+ica-litellm-key-router-v0.2.0.zip
+ica-litellm-key-router-v0.2.0.zip.sha256
 ```
 
 The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces, the exact ZIP filename, and a final newline. A release also contains standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, and `SHA256SUMS`; the latter covers the ZIP, ZIP sidecar, both installers, and manifest.
@@ -151,7 +159,7 @@ The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces,
 Linux example after downloading the ZIP and its sidecar:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.1.1.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.2.0.zip.sha256
 ```
 
 After downloading all release files named by `SHA256SUMS`, verify the complete set, including both standalone installers:
@@ -163,7 +171,7 @@ sha256sum --check --strict SHA256SUMS
 Windows example for the exact ZIP sidecar:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.1.1.zip'
+$asset = 'ica-litellm-key-router-v0.2.0.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -187,7 +195,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 A same-channel checksum detects corruption or inconsistent bytes; it does **not** independently authenticate the publisher. Before execution, also verify the exact tag/commit and a signature or artifact attestation from a trusted project identity. For a published GitHub artifact attestation, for example:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.1.1.zip \
+gh attestation verify ica-litellm-key-router-v0.2.0.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -206,14 +214,14 @@ Publishing is a release gate: run CI, reproduce the ZIP, verify the sidecar, tes
 From an extracted, verified release:
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.1.1
+cd /path/to/ica-litellm-key-router-v0.2.0
 bash ./install-linux.sh
 ```
 
-Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.1.1`):
+Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.2.0`):
 
 ```bash
-ICA_ROUTER_REF=v0.1.1 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.2.0 bash ./install-linux.sh
 ```
 
 On the first run, the installer asks for one key at a time for each catalog pool. Input is hidden. Press Enter on an empty key prompt after the last key in that pool. At least one key is required in each pool. It then generates all deployments and starts LiteLLM.
@@ -221,26 +229,40 @@ On the first run, the installer asks for one key at a time for each catalog pool
 On later runs, if the saved secrets, generated state, and selected release pass `doctor`, the installer skips downloading and reinstalling dependencies. It only ensures that LiteLLM is running. Use `--force-install` when an actual reinstall or update is intended, and `--replace-keys` to replace all saved pool keys. `--replace-keys` preserves the local proxy master key, so existing client files remain valid.
 When upgrading legacy state, bootstrap preserves `ica-services-essentials`, removes the deprecated `ibm-ica-nextgen` pool from active secrets, and writes a private timestamped backup first. An explicit client merge removes the three deprecated NextGen router provider IDs. The protected secrets backup can still contain retired NextGen values; delete that backup after verification if it is no longer required.
 
-Client configuration is opt-in and may be done during installation or later:
+Client and service configuration are opt-in and may be done during installation or later:
 
 ```bash
-# Do not touch models.json (default).
+# Do not touch models.json and use the background lifecycle (default).
 bash ./install-linux.sh
 
-# Create or merge Pi's file.
+# Enable supervised autostart at user login.
+bash ./install-linux.sh --systemd-user
+
+# Create or merge Pi's command-backed router providers.
 bash ./install-linux.sh --pi-models
 
-# Create or merge both supported client files.
+# Create or merge both Pi-format client files.
 bash ./install-linux.sh --pi-models --prime-models
 
-# Create or merge an explicit path; repeat the option if needed.
+# Create or merge an explicit Pi-format path; repeat the option if needed.
 bash ./install-linux.sh --models-json /private/path/models.json
 
-# The same operation remains available separately after installation.
-ica-router stop
-ica-router configure-clients --client "$HOME/.pi/agent/models.json"
-ica-router start
+# Configure all supported harnesses after installation.
+ica-router configure-harnesses --all
+
+# Or select individual harnesses. Prime-agent remains explicit.
+ica-router configure-harnesses --pi --claude-code --codex
+ica-router configure-harnesses --prime
 ```
+
+`configure-harnesses` creates or merges:
+
+- Pi router providers in `~/.pi/agent/models.json`;
+- optional prime-agent providers in `~/.prime/agent/models.json`;
+- Claude Code gateway settings and `apiKeyHelper` in `~/.claude/settings.json`; and
+- a dedicated `~/.codex/ica-router.config.toml` profile for Codex 0.134.0 or later, leaving subscription defaults untouched.
+
+All generated authentication settings call `ica-router client-token` instead of storing the local master key. The Codex profile disables its request and stream retries because the router already owns pre-output retries.
 
 The installer:
 
@@ -252,7 +274,7 @@ The installer:
 6. atomically switches `current` to the new release;
 7. preserves valid existing secrets, or on first install reads keys until an empty value ends each pool;
 8. writes generated state and, only when requested, creates or merges client files;
-9. runs `doctor`, starts one worker, and creates a best-effort `~/.local/bin/ica-router` symlink.
+9. runs `doctor`, starts one worker directly or through the requested/preserved systemd user service, and creates a best-effort `~/.local/bin/ica-router` symlink.
 
 Default layout:
 
@@ -266,6 +288,7 @@ Default layout:
 | Private `uv` and cache | `<install-root>/tools/uv-0.12.2`, `<install-root>/cache/uv` |
 | Direct wrapper | `<install-root>/ica-router` |
 | Convenience symlink | `~/.local/bin/ica-router` |
+| Optional managed user unit | `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ica-litellm-key-router.service` |
 
 If `~/.local/bin` is not on `PATH`, invoke the direct wrapper or add the directory to `PATH`.
 
@@ -288,7 +311,7 @@ A leftover `<install-root>/.install.lock` directory after a crash blocks Linux i
 From an extracted, verified release:
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.1.1'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.0'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -318,6 +341,13 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -P
 # Other choices: -PrimeModels or -ModelsJson 'D:\Private\models.json'.
 ```
 
+After installation, the Windows wrapper can generate the same command-backed harness configuration:
+
+```powershell
+$router = Join-Path $env:LOCALAPPDATA 'IcaLiteLLMKeyRouter\ica-router.ps1'
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $router configure-harnesses --all
+```
+
 Use `-ReplaceKeys` to enter all Services Essentials keys again and `-ForceInstall` for an actual reinstall/update.
 
 Overrides:
@@ -325,7 +355,7 @@ Overrides:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.1.1' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.0' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```
@@ -380,7 +410,7 @@ Auto-import checks `~/.pi/agent/key-rotator.json` and `~/.prime/agent/key-rotato
 
 On Unix, installer-owned private directories use mode `0700` and private files use `0600`. Windows uses protected current-user-only ACLs and fails if restriction or verification fails. Raw upstream keys are stored in plaintext `state/secrets.json` and loaded into the LiteLLM process environment. `config.yaml` contains environment references rather than raw keys.
 
-The local master key is not an IBM key. It grants authenticated access to every local router route and is copied into `client-models.generated.json` and each configured Pi/prime-agent `models.json`. Replacing upstream API keys preserves this local key by default. The lower-level `bootstrap --replace-secrets --rotate-master-key` option rotates it explicitly; after using that option, regenerate every configured client file before use. A timestamped backup contains the entire previous client file, including any unrelated provider secrets. Treat state, client files, process environment, logs, memory, and backups as sensitive. Do not merge while another process writes the same client file.
+The local master key is not an IBM key. It grants authenticated access to every local router route and remains canonical only in `state/secrets.json` and the LiteLLM process environment. Generated Pi/prime-agent providers, Claude Code `apiKeyHelper`, and the Codex router profile execute `ica-router client-token`; they do not persist another key copy. Replacing or explicitly rotating the local key therefore does not require rewriting command-backed clients, although already running clients can cache the helper result briefly and may need to retry or restart. A timestamped backup contains the entire previous client file and can include unrelated provider secrets from before the merge. Treat state, client files, process environment, logs, memory, helper output, and backups as sensitive. Do not merge while another process writes the same client file.
 
 ## Native API endpoints
 
@@ -452,7 +482,11 @@ ica-router status
 ica-router doctor
 ica-router stop
 ica-router start
+ica-router install-systemd-user
+ica-router uninstall-systemd-user
 ```
+
+The managed systemd unit runs LiteLLM in the foreground, waits for authenticated readiness, restarts it after failures, and is enabled for user login. Starting at boot before login additionally requires the administrator/user to enable systemd lingering; the router does not change lingering automatically. The Linux installer preserves an already enabled managed unit across updates, or enables it explicitly with `--systemd-user`.
 
 Windows:
 
@@ -479,7 +513,7 @@ Lifecycle commands use OS locking on private `state/command.lock`. `run.json` re
 
 `doctor` is offline with respect to IBM. It checks catalog/state schema, the generation marker, deployment count, absence of raw credentials in `config.yaml`, and Unix private modes. It cannot prove that IBM accepts a key or that the account has quota.
 
-State-changing commands require the managed router to be stopped and also take `command.lock`:
+Private state-changing commands require the managed router to be stopped and also take `command.lock`:
 
 ```bash
 ica-router generate
@@ -488,7 +522,17 @@ ica-router configure-clients --client /private/path/models.json
 ica-router bootstrap --port 4100 --client auto
 ```
 
-`bootstrap` creates or preserves secrets and rewrites a complete generated state. `generate` accepts only a currently consistent generation. `configure-clients` merges the three active router-owned providers. Auto mode changes only existing `~/.pi/agent/models.json` and `~/.prime/agent/models.json` files.
+`bootstrap` creates or preserves secrets and rewrites a complete generated state. `generate` accepts only a currently consistent generation. `configure-clients` merges the three active router-owned Pi-format providers. Auto mode changes only existing `~/.pi/agent/models.json` and `~/.prime/agent/models.json` files.
+
+Harness configuration can run while the router is healthy because it reads a generation-bound snapshot and changes only client files:
+
+```bash
+ica-router configure-harnesses --all
+ica-router configure-harnesses --pi --claude-code --codex
+ica-router configure-harnesses --prime
+```
+
+`client-token` is intended for generated command-backed authentication. It prints only the current local credential (or `Bearer <credential>` with `--bearer`) and must be treated as a secret-producing command.
 
 Persistent state includes `secrets.json`, `config.yaml` (JSON valid as YAML), `client-models.generated.json`, `runtime.json`, and `generation.json`. The generation marker binds normalized digests of catalog, secrets, generated config, generated clients, and runtime. It is written last so an interrupted multi-file generation fails closed. Lifecycle files are `command.lock`, transient `run.json`, and `router.log`; logs above 10 MiB rotate to `router.log.1`. Private `process-home`, `process-cache`, and `process-tmp` directories isolate LiteLLM from the caller's home but can retain dependency cache or temporary data, so include them in state protection and retention handling.
 
@@ -561,7 +605,7 @@ The merge retains unrelated provider IDs, replaces the three active router-owned
 
 ### Local authentication fails
 
-The client may hold an older local master key. Stop the router, rerun `configure-clients`, and restart the client. Never substitute an IBM key for the local master key.
+Run `ica-router client-token` only to verify that the command succeeds; do not paste its output into config. Rerun `configure-harnesses` (or the legacy Pi-only `configure-clients`) to repair helper paths. A running client may cache a previous helper result briefly after explicit master-key rotation, so retry or restart that client. Never substitute an IBM key for the local master key.
 
 ### Upstream authentication, timeout, or rate-limit failure
 
@@ -577,7 +621,7 @@ The client may hold an older local master key. Stop the router, rerun `configure
 
 An installer serializes updates, stages a versioned release, snapshots generated state and explicitly requested client files, stops the old managed process, atomically switches `current`, bootstraps, checks, and starts. Valid existing port, `maxFallbacks`, and cooldown runtime settings are preserved unless an explicit bootstrap flag changes them. On a handled failure after stop/switch, the installer attempts to restore the previous pointer, state, and requested client files and restart the old release. Old versioned releases are retained.
 
-Rollback is **best effort**, not a crash-proof transaction. Power loss, forced termination, storage failure, ACL failure, or custom client paths can leave partial work or require manual recovery. The local master key and unrelated client secrets exist in rollback snapshots and timestamped backups. Keep an independent protected backup until verification, and remove obsolete releases/backups deliberately.
+Rollback is **best effort**, not a crash-proof transaction. Power loss, forced termination, storage failure, ACL failure, or custom client paths can leave partial work or require manual recovery. Unrelated pre-existing client secrets can exist in rollback snapshots and timestamped backups; command-backed router entries themselves contain only helper commands. Keep an independent protected backup until verification, and remove obsolete releases/backups deliberately.
 
 ## Uninstall
 
@@ -592,10 +636,13 @@ There is no automated uninstaller.
 Linux defaults:
 
 ```bash
+ica-router uninstall-systemd-user || true
 ica-router stop || true
 rm -f "$HOME/.local/bin/ica-router"
 rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ica-litellm-key-router"
 ```
+
+Also remove the managed Claude Code settings and the dedicated Codex profile if they are no longer wanted; use their timestamped backups to restore previous content where applicable.
 
 Windows defaults:
 
@@ -619,7 +666,7 @@ Read [SECURITY.md](SECURITY.md). Main limits:
 - no mid-stream failover;
 - no IBM credential/quota validation in `doctor`;
 - plaintext secrets protected by filesystem permissions/ACLs, not a vault;
-- local master keys copied into configured clients and whole-file backups;
+- command-backed helpers reduce persistent copies but deliver the local master key to each client process at runtime;
 - same-user, administrator, debugger, or compromised-process access remains in scope;
 - a minimal runtime environment with direct HTTPS only; ambient proxies, custom CAs, and environment-based provider features are not inherited;
 - checksum verification is not independent publisher authentication;

@@ -5,7 +5,7 @@
 [![CI](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml/badge.svg)](https://github.com/sehoon123/ica-litellm-key-router/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인증 [LiteLLM](https://github.com/BerriAI/litellm) 프록시입니다. Pi와 prime-agent가 사용하는 OpenAI Responses, Anthropic Messages, Gemini `generateContent` 네이티브 인터페이스를 유지합니다.
+IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인증 [LiteLLM](https://github.com/BerriAI/litellm) 프록시입니다. Pi, prime-agent, Codex, Claude Code가 사용하는 OpenAI Responses, Anthropic Messages, Gemini `generateContent` 네이티브 인터페이스를 유지합니다.
 
 이 라우터는 credential을 발급하지 않습니다. 사용 권한이 있는 credential과 IBM 서비스만 사용하십시오.
 
@@ -17,16 +17,18 @@ IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인�
 - `simple-shuffle`로 정상 deployment를 무작위 선택합니다. round-robin이 아닙니다.
 - 지정된 오류가 발생하면 deployment를 즉시 cooldown하고, 출력 전 재시도가 가능한 오류를 재시도합니다.
 - provider SDK 재시도는 0이고 weighted failover는 비활성화합니다.
-- raw upstream key를 생성된 `config.yaml`에 넣지 않습니다.
-- 기존 Pi/prime-agent `models.json`에서 다른 provider를 삭제하지 않고 라우터 provider를 병합합니다.
+- Raw upstream key를 생성된 `config.yaml`에 넣지 않습니다.
+- Command-backed client credential을 사용하므로 생성된 Pi, Claude Code, Codex 설정에 local master key 사본을 저장하지 않습니다.
+- 관련 없는 설정이나 Codex 구독 기본값을 교체하지 않고 Pi/prime-agent, Claude Code, 별도 Codex profile을 구성합니다.
+- Linux에서 supervision 및 restart-on-failure가 적용된 `systemd --user` service를 설치할 수 있습니다.
 - Python `3.12.13`, `uv` `0.12.2`, LiteLLM `1.98.0` 및 `uv.lock`으로 고정된 전용 runtime을 설치합니다.
 
 ## 아키텍처와 신뢰 경계
 
 ```text
-Pi / prime-agent / curl
+Pi / prime-agent / Claude Code / Codex / curl
         |
-        | loopback HTTP + 로컬 master key
+        | command로 가져온 local master key + loopback HTTP
         v
 LiteLLM 1.98.0, worker 1개, 127.0.0.1:4000
         |
@@ -113,16 +115,22 @@ git clone https://github.com/sehoon123/ica-litellm-key-router.git
 cd ica-litellm-key-router
 ```
 
-`~/.pi/agent/key-rotator.json`에 `ica-services-essentials` pool이 이미 있다면 다음 명령이 가장 짧은 비대화식 Pi 설치 방법입니다. 기존 key를 자동으로 import합니다.
+`~/.pi/agent/key-rotator.json`에 `ica-services-essentials` pool이 이미 있다면 다음 명령이 가장 짧은 비대화식 설치 방법입니다. 기존 key를 자동으로 import하고 supervised Linux user service를 활성화합니다.
 
 ```bash
-ICA_ROUTER_NON_INTERACTIVE=1 bash ./install-linux.sh --pi-models
+ICA_ROUTER_NON_INTERACTIVE=1 bash ./install-linux.sh --systemd-user
 ```
 
 Import 가능한 key-rotator 파일이 없는 새 환경에서는 대화식으로 실행하고 prompt에 사용 권한이 있는 Services Essentials key를 입력합니다.
 
 ```bash
-bash ./install-linux.sh --pi-models
+bash ./install-linux.sh --systemd-user
+```
+
+Pi, Claude Code, 별도 Codex profile을 구성합니다. 생성 client는 `ica-router client-token`으로 local credential을 가져오며 token을 저장하지 않습니다.
+
+```bash
+$HOME/.local/share/ica-litellm-key-router/ica-router configure-harnesses --all
 ```
 
 Router 상태와 Pi를 통한 GPT-5.6 Sol 호출을 확인합니다.
@@ -135,15 +143,15 @@ pi --print \
   'Reply with exactly: OK'
 ```
 
-Installer는 관련 없는 Pi provider를 보존하고 router가 소유하는 provider 3개만 교체합니다. Clone 경로는 설치 source일 뿐이며 runtime state는 `$HOME/.local/share/ica-litellm-key-router` 아래에 저장됩니다.
+Codex 0.134.0 이상에서는 생성된 `~/.codex/ica-router.config.toml` profile을 `codex --profile ica-router`로 사용합니다. Claude Code는 `~/.claude/settings.json`을 읽습니다. `apiKeyHelper`와 충돌할 수 있는 shell-level `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` 값은 해제하십시오. Installer는 관련 없는 Pi provider를 보존하고 harness merge는 관련 없는 Claude 설정을 보존합니다. Clone 경로는 설치 source일 뿐이며 runtime state는 `$HOME/.local/share/ica-litellm-key-router` 아래에 저장됩니다.
 
 ## 설치 전 release 검증
 
-`v0.1.1` runtime source asset 이름은 다음과 같습니다.
+`v0.2.0` runtime source asset 이름은 다음과 같습니다.
 
 ```text
-ica-litellm-key-router-v0.1.1.zip
-ica-litellm-key-router-v0.1.1.zip.sha256
+ica-litellm-key-router-v0.2.0.zip
+ica-litellm-key-router-v0.2.0.zip.sha256
 ```
 
 ZIP sidecar는 소문자 SHA-256 digest, 공백 두 개, 정확한 ZIP filename, 마지막 newline으로 이루어진 한 줄이어야 합니다. Release에는 standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, `SHA256SUMS`도 포함됩니다. `SHA256SUMS`는 ZIP, ZIP sidecar, installer 두 개, manifest를 모두 검증합니다.
@@ -151,7 +159,7 @@ ZIP sidecar는 소문자 SHA-256 digest, 공백 두 개, 정확한 ZIP filename,
 ZIP과 sidecar를 받은 뒤 Linux에서 확인하는 예:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.1.1.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.2.0.zip.sha256
 ```
 
 `SHA256SUMS`에 적힌 release 파일을 모두 받은 뒤 installer 두 개를 포함한 전체 set을 확인하십시오.
@@ -163,7 +171,7 @@ sha256sum --check --strict SHA256SUMS
 Windows에서 exact ZIP sidecar를 확인하는 예:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.1.1.zip'
+$asset = 'ica-litellm-key-router-v0.2.0.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -187,7 +195,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 같은 channel에서 받은 checksum은 파일 손상이나 byte 불일치를 찾지만 publisher identity를 독립적으로 인증하지는 않습니다. 실행하기 전에 정확한 tag/commit과 신뢰하는 프로젝트 identity의 signature 또는 artifact attestation도 확인하십시오. GitHub artifact attestation이 배포된 경우의 예:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.1.1.zip \
+gh attestation verify ica-litellm-key-router-v0.2.0.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -206,14 +214,14 @@ python scripts/build-release.py --output-dir dist
 검증하고 압축 해제한 release에서 실행합니다.
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.1.1
+cd /path/to/ica-litellm-key-router-v0.2.0
 bash ./install-linux.sh
 ```
 
-별도로 검증한 standalone installer도 사용할 수 있습니다. 옆에 완전한 source tree가 없으면 `ICA_ROUTER_REF`의 정확한 asset을 받습니다. 기본값은 `v0.1.1`입니다.
+별도로 검증한 standalone installer도 사용할 수 있습니다. 옆에 완전한 source tree가 없으면 `ICA_ROUTER_REF`의 정확한 asset을 받습니다. 기본값은 `v0.2.0`입니다.
 
 ```bash
-ICA_ROUTER_REF=v0.1.1 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.2.0 bash ./install-linux.sh
 ```
 
 최초 실행에서는 각 catalog pool의 key를 한 개씩 안전하게 입력받습니다. 입력 내용은 화면에 표시되지 않습니다. 해당 pool의 마지막 key 다음 prompt에서 아무것도 입력하지 않고 Enter를 누르면 입력이 끝납니다. 각 pool에는 최소 한 개의 key가 필요합니다. 이후 모든 deployment를 생성하고 LiteLLM을 시작합니다.
@@ -221,26 +229,40 @@ ICA_ROUTER_REF=v0.1.1 bash ./install-linux.sh
 다시 실행했을 때 저장된 secrets, 생성 state, 선택 release가 `doctor`를 통과하면 dependency를 다시 받거나 설치하지 않습니다. LiteLLM이 실행 중인지 확인하고, 중지되어 있으면 시작하기만 합니다. 실제 재설치 또는 update가 필요하면 `--force-install`, 모든 key를 다시 입력하려면 `--replace-keys`를 사용합니다. `--replace-keys`는 로컬 proxy master key를 보존하므로 기존 client 파일의 인증이 유지됩니다.
 기존 state를 upgrade할 때 bootstrap은 `ica-services-essentials`를 보존하고 active secrets에서 deprecated `ibm-ica-nextgen` pool을 제거하기 전에 private timestamp backup을 만듭니다. 명시적인 client merge는 deprecated NextGen router provider ID 3개도 제거합니다. 보호된 secrets backup에는 폐기된 NextGen 값이 남을 수 있으므로 검증 후 필요 없으면 해당 backup을 삭제하십시오.
 
-Client 설정은 명시적인 선택 사항이며 설치 중 또는 설치 후 따로 만들 수 있습니다.
+Client와 service 설정은 명시적인 선택 사항이며 설치 중 또는 설치 후 따로 만들 수 있습니다.
 
 ```bash
-# models.json을 변경하지 않음(기본 동작)
+# models.json을 변경하지 않고 background lifecycle 사용(기본 동작)
 bash ./install-linux.sh
 
-# Pi models.json 생성 또는 병합
+# User login 시 supervised autostart 활성화
+bash ./install-linux.sh --systemd-user
+
+# Pi의 command-backed router provider 생성 또는 병합
 bash ./install-linux.sh --pi-models
 
-# Pi와 prime-agent 파일 모두 생성 또는 병합
+# Pi-format client 파일 두 개 생성 또는 병합
 bash ./install-linux.sh --pi-models --prime-models
 
-# 원하는 경로 생성 또는 병합. 여러 경로면 옵션을 반복함
+# 원하는 Pi-format 경로 생성 또는 병합. 여러 경로면 옵션을 반복함
 bash ./install-linux.sh --models-json /private/path/models.json
 
-# 설치 후 별도 실행도 가능
-ica-router stop
-ica-router configure-clients --client "$HOME/.pi/agent/models.json"
-ica-router start
+# 설치 후 지원 harness 모두 구성
+ica-router configure-harnesses --all
+
+# Harness를 개별 선택. prime-agent는 명시적으로 선택
+ica-router configure-harnesses --pi --claude-code --codex
+ica-router configure-harnesses --prime
 ```
+
+`configure-harnesses`가 생성하거나 병합하는 항목:
+
+- `~/.pi/agent/models.json`의 Pi router provider;
+- 선택한 경우 `~/.prime/agent/models.json`의 prime-agent provider;
+- `~/.claude/settings.json`의 Claude Code gateway 설정과 `apiKeyHelper`;
+- Codex 0.134.0 이상에서 구독 기본값을 유지하는 별도 `~/.codex/ica-router.config.toml` profile.
+
+생성된 모든 인증 설정은 local master key를 저장하지 않고 `ica-router client-token`을 호출합니다. Codex profile은 router가 출력 전 재시도를 담당하므로 자체 request/stream retry를 비활성화합니다.
 
 Installer 동작:
 
@@ -252,7 +274,7 @@ Installer 동작:
 6. `current`를 새 release로 atomic 전환합니다.
 7. 유효한 기존 secrets를 보존합니다. 최초 설치에서는 각 pool에서 빈 값을 입력할 때까지 key를 받습니다.
 8. 생성 state를 쓰고, 요청한 경우에만 client 파일을 생성하거나 병합합니다.
-9. `doctor` 실행 후 worker 한 개를 시작하고, best-effort `~/.local/bin/ica-router` symlink를 만듭니다.
+9. `doctor` 실행 후 worker 한 개를 직접 또는 요청/보존된 systemd user service로 시작하고, best-effort `~/.local/bin/ica-router` symlink를 만듭니다.
 
 기본 layout:
 
@@ -266,6 +288,7 @@ Installer 동작:
 | 전용 `uv`와 cache | `<install-root>/tools/uv-0.12.2`, `<install-root>/cache/uv` |
 | 직접 wrapper | `<install-root>/ica-router` |
 | 편의 symlink | `~/.local/bin/ica-router` |
+| 선택 가능한 managed user unit | `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ica-litellm-key-router.service` |
 
 `~/.local/bin`이 `PATH`에 없으면 직접 wrapper를 실행하거나 해당 directory를 `PATH`에 추가하십시오.
 
@@ -288,7 +311,7 @@ Crash 후 `<install-root>/.install.lock` directory가 남으면 Linux 설치가 
 검증하고 압축 해제한 release에서 실행합니다.
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.1.1'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.0'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -318,6 +341,13 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -P
 # 다른 선택: -PrimeModels 또는 -ModelsJson 'D:\Private\models.json'
 ```
 
+설치 후 Windows wrapper에서도 같은 command-backed harness 설정을 생성할 수 있습니다.
+
+```powershell
+$router = Join-Path $env:LOCALAPPDATA 'IcaLiteLLMKeyRouter\ica-router.ps1'
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $router configure-harnesses --all
+```
+
 모든 Services Essentials key를 다시 입력하려면 `-ReplaceKeys`, 실제 재설치/update에는 `-ForceInstall`을 사용합니다.
 
 Override 예:
@@ -325,7 +355,7 @@ Override 예:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.1.1' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.0' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```
@@ -380,7 +410,7 @@ Auto-import는 `~/.pi/agent/key-rotator.json`, `~/.prime/agent/key-rotator.json`
 
 Unix에서 installer-owned private directory는 mode `0700`, private file은 `0600`을 사용합니다. Windows는 protected current-user-only ACL을 사용하며 제한 또는 검증이 실패하면 중단합니다. Raw upstream key는 `state/secrets.json`에 plaintext로 저장되고 LiteLLM process environment에 로드됩니다. `config.yaml`에는 raw key가 아닌 environment reference가 들어갑니다.
 
-Local master key는 IBM key가 아닙니다. 모든 로컬 router route에 인증된 접근 권한을 주며 `client-models.generated.json`과 설정된 Pi/prime-agent `models.json`에 복사됩니다. Upstream API key를 교체해도 이 로컬 key는 기본적으로 보존됩니다. 하위 명령 `bootstrap --replace-secrets --rotate-master-key`를 사용하면 명시적으로 회전하며, 그 후에는 사용 전에 설정된 모든 client 파일을 다시 생성해야 합니다. Timestamp backup은 이전 client 파일 전체를 포함하므로 다른 provider의 secret도 들어갈 수 있습니다. State, client file, process environment, log, memory, backup을 secret으로 취급하십시오. 다른 process가 같은 client 파일을 쓰는 동안 병합하지 마십시오.
+Local master key는 IBM key가 아닙니다. 모든 로컬 router route에 인증된 접근 권한을 주며 canonical 값은 `state/secrets.json`과 LiteLLM process environment에만 남습니다. 생성된 Pi/prime-agent provider, Claude Code `apiKeyHelper`, Codex router profile은 `ica-router client-token`을 실행하므로 key 사본을 저장하지 않습니다. 따라서 local key를 교체하거나 명시적으로 rotate해도 command-backed client file을 다시 쓸 필요는 없지만, 실행 중인 client가 helper 결과를 잠시 cache할 수 있어 retry 또는 restart가 필요할 수 있습니다. Timestamp backup은 merge 전 client 파일 전체를 포함하므로 기존의 다른 provider secret이 들어갈 수 있습니다. State, client file, process environment, log, memory, helper output, backup을 secret으로 취급하십시오. 다른 process가 같은 client 파일을 쓰는 동안 병합하지 마십시오.
 
 ## 네이티브 API endpoint
 
@@ -452,7 +482,11 @@ ica-router status
 ica-router doctor
 ica-router stop
 ica-router start
+ica-router install-systemd-user
+ica-router uninstall-systemd-user
 ```
+
+Managed systemd unit은 LiteLLM을 foreground로 실행하고 authenticated readiness를 기다리며 실패 시 재시작하고 user login 시 자동 시작하도록 enable됩니다. Login 전 boot 시점부터 실행하려면 관리자/사용자가 systemd lingering을 별도로 enable해야 하며 router가 lingering 설정을 자동 변경하지는 않습니다. Linux installer는 이미 enable된 managed unit을 update 후에도 보존하며 `--systemd-user`로 명시적으로 활성화할 수도 있습니다.
 
 Windows:
 
@@ -479,7 +513,7 @@ Lifecycle command는 private `state/command.lock`의 OS lock을 사용합니다.
 
 `doctor`는 IBM에 대해 offline입니다. Catalog/state schema, generation marker, deployment 수, `config.yaml`에 raw credential이 없는지, Unix private mode를 검사합니다. IBM이 key를 승인하는지 또는 quota가 있는지는 검증하지 못합니다.
 
-State 변경 command는 managed router가 중지되어 있어야 하며 `command.lock`도 획득합니다.
+Private state 변경 command는 managed router가 중지되어 있어야 하며 `command.lock`도 획득합니다.
 
 ```bash
 ica-router generate
@@ -488,7 +522,17 @@ ica-router configure-clients --client /private/path/models.json
 ica-router bootstrap --port 4100 --client auto
 ```
 
-`bootstrap`은 secret을 생성하거나 보존하고 완전한 생성 state를 다시 씁니다. `generate`는 현재 generation이 일관된 경우에만 실행됩니다. `configure-clients`는 현재 라우터 소유 provider 3개를 병합합니다. Auto mode는 기존 `~/.pi/agent/models.json`, `~/.prime/agent/models.json`만 변경합니다.
+`bootstrap`은 secret을 생성하거나 보존하고 완전한 생성 state를 다시 씁니다. `generate`는 현재 generation이 일관된 경우에만 실행됩니다. `configure-clients`는 현재 라우터 소유 Pi-format provider 3개를 병합합니다. Auto mode는 기존 `~/.pi/agent/models.json`, `~/.prime/agent/models.json`만 변경합니다.
+
+Harness 설정은 generation-bound snapshot을 읽고 client file만 변경하므로 router가 정상 실행 중일 때도 사용할 수 있습니다.
+
+```bash
+ica-router configure-harnesses --all
+ica-router configure-harnesses --pi --claude-code --codex
+ica-router configure-harnesses --prime
+```
+
+`client-token`은 생성된 command-backed 인증용입니다. 현재 local credential만 출력하며 `--bearer`를 사용하면 `Bearer <credential>`을 출력하므로 secret을 출력하는 command로 취급해야 합니다.
 
 영구 state에는 `secrets.json`, `config.yaml`(YAML로 유효한 JSON), `client-models.generated.json`, `runtime.json`, `generation.json`이 있습니다. Generation marker는 catalog, secrets, 생성 config, 생성 client, runtime의 normalized digest를 묶습니다. 마지막에 기록되므로 multi-file 생성이 중단되면 fail-closed합니다. Lifecycle file은 `command.lock`, 실행 중에만 존재하는 `run.json`, `router.log`입니다. 10 MiB를 넘는 log는 `router.log.1`로 rotate됩니다. Private `process-home`, `process-cache`, `process-tmp`는 caller home에서 LiteLLM을 격리하지만 dependency cache나 임시 data가 남을 수 있으므로 state 보호 및 retention 대상에 포함하십시오.
 
@@ -561,7 +605,7 @@ Merge는 다른 provider ID를 보존하고 현재 라우터 소유 ID 3개를 �
 
 ### Local 인증 실패
 
-Client에 오래된 local master key가 있을 수 있습니다. Router를 중지하고 `configure-clients`를 다시 실행한 뒤 client를 다시 시작하십시오. Local master key 대신 IBM key를 넣으면 안 됩니다.
+`ica-router client-token`은 command가 성공하는지만 확인할 때 사용하고 출력값을 config에 붙여 넣지 마십시오. Helper path를 복구하려면 `configure-harnesses` 또는 legacy Pi-only `configure-clients`를 다시 실행하십시오. Local master key를 명시적으로 rotate한 직후 실행 중인 client가 이전 helper 결과를 잠시 cache할 수 있으므로 retry 또는 restart하십시오. Local master key 대신 IBM key를 넣으면 안 됩니다.
 
 ### Upstream authentication, timeout 또는 rate-limit 실패
 
@@ -577,7 +621,7 @@ Client에 오래된 local master key가 있을 수 있습니다. Router를 중�
 
 Installer는 update를 직렬화하고 versioned release를 stage합니다. 생성 state와 명시적으로 요청한 client 파일을 snapshot하고, 이전 managed process를 중지하고, `current`를 atomic 전환하고, bootstrap/check/start를 수행합니다. 유효한 기존 port, `maxFallbacks`, cooldown runtime 설정은 명시적 bootstrap flag로 바꾸지 않는 한 보존됩니다. Stop/switch 후 처리된 오류가 발생하면 이전 pointer, state, 요청한 client 파일을 복원하고 이전 release 재시작을 시도합니다. 이전 versioned release는 보존됩니다.
 
-Rollback은 **best effort**이며 crash-proof transaction이 아닙니다. 전원 손실, 강제 종료, storage/ACL 실패, custom client path는 부분 작업이나 수동 복구를 남길 수 있습니다. Local master key와 다른 client secret이 rollback snapshot 및 timestamp backup에 들어갑니다. 검증이 끝날 때까지 별도의 보호된 backup을 유지하고, 오래된 release와 backup을 의도적으로 정리하십시오.
+Rollback은 **best effort**이며 crash-proof transaction이 아닙니다. 전원 손실, 강제 종료, storage/ACL 실패, custom client path는 부분 작업이나 수동 복구를 남길 수 있습니다. 기존의 다른 client secret은 rollback snapshot 및 timestamp backup에 들어갈 수 있지만 command-backed router 항목 자체에는 helper command만 들어갑니다. 검증이 끝날 때까지 별도의 보호된 backup을 유지하고, 오래된 release와 backup을 의도적으로 정리하십시오.
 
 ## 삭제
 
@@ -592,10 +636,13 @@ Rollback은 **best effort**이며 crash-proof transaction이 아닙니다. 전�
 Linux 기본값:
 
 ```bash
+ica-router uninstall-systemd-user || true
 ica-router stop || true
 rm -f "$HOME/.local/bin/ica-router"
 rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/ica-litellm-key-router"
 ```
+
+더 이상 필요하지 않으면 managed Claude Code 설정과 별도 Codex profile도 제거하십시오. 필요한 경우 timestamp backup을 이용해 이전 내용을 복구합니다.
 
 Windows 기본값:
 
@@ -619,7 +666,7 @@ Remove-Item -LiteralPath $root -Recurse -Force
 - mid-stream failover 없음;
 - `doctor`는 IBM credential/quota를 검증하지 않음;
 - secret은 vault가 아니라 filesystem permission/ACL로 보호되는 plaintext임;
-- local master key가 설정 client와 전체 파일 backup에 복사됨;
+- command-backed helper는 persistent 사본을 줄이지만 runtime에는 각 client process에 local master key를 전달함;
 - same-user, administrator, debugger 또는 침해된 process 접근은 방어하지 못함;
 - 최소 runtime environment와 direct HTTPS만 사용하며 ambient proxy, custom CA, environment 기반 provider 기능을 상속하지 않음;
 - checksum 검증은 독립적인 publisher 인증이 아님;

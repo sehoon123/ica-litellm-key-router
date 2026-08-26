@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import stat
 import tempfile
+import tomllib
 import types
 import unittest
 from unittest import mock
@@ -94,8 +97,9 @@ class RouterConfigTests(unittest.TestCase):
             routerctl.validate_catalog(catalog)
 
     def test_client_protocol_bases_preserve_native_surfaces(self) -> None:
+        state_dir = Path("/private/router/state")
         generated = routerctl.generate_client_providers(
-            self.catalog, self.secrets["masterKey"], "127.0.0.1", 4000
+            self.catalog, "127.0.0.1", 4000, state_dir
         )["providers"]
         self.assertEqual("http://127.0.0.1:4000/v1", generated["ica-se-openai-router"]["baseUrl"])
         self.assertEqual("openai-responses", generated["ica-se-openai-router"]["api"])
@@ -105,11 +109,355 @@ class RouterConfigTests(unittest.TestCase):
             generated["ica-se-gemini-router"]["baseUrl"],
         )
         self.assertEqual(
-            f"Bearer {self.secrets['masterKey']}",
+            f"!{routerctl.client_token_command(state_dir)}",
+            generated["ica-se-openai-router"]["apiKey"],
+        )
+        self.assertEqual(
+            f"!{routerctl.client_token_command(state_dir, bearer=True)}",
             generated["ica-se-gemini-router"]["headers"]["Authorization"],
         )
         self.assertEqual(12, sum(len(p["models"]) for p in generated.values()))
-        self.assertNotIn("litellmBaseModel", json.dumps(generated))
+        rendered = json.dumps(generated)
+        self.assertNotIn("litellmBaseModel", rendered)
+        self.assertNotIn(self.secrets["masterKey"], rendered)
+
+    def test_client_token_reads_private_state_without_persisting_another_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir(mode=0o700)
+            secrets_path = state_dir / "secrets.json"
+            secrets_path.write_text(json.dumps(self.secrets))
+            if os.name != "nt":
+                secrets_path.chmod(0o600)
+            output = io.StringIO()
+            with mock.patch.object(routerctl.sys, "stdout", output):
+                self.assertEqual(
+                    0,
+                    routerctl.cmd_client_token(
+                        types.SimpleNamespace(state_dir=state_dir, bearer=True)
+                    ),
+                )
+            self.assertEqual(f"Bearer {self.secrets['masterKey']}\n", output.getvalue())
+
+    def test_claude_settings_use_helper_and_preserve_unrelated_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".claude" / "settings.json"
+            path.parent.mkdir()
+            path.write_text(
+                json.dumps(
+                    {
+                        "permissions": {"allow": ["Bash(git status)"]},
+                        "env": {
+                            "KEEP_ME": "yes",
+                            "ANTHROPIC_API_KEY": "old-persisted-key",
+                        },
+                    }
+                )
+            )
+            changed, backup = routerctl.merge_claude_code_settings(
+                path,
+                "/private/router/ica-router client-token",
+                "http://127.0.0.1:4000",
+                routerctl.DEFAULT_CLAUDE_MODEL,
+            )
+            self.assertTrue(changed)
+            self.assertIsNotNone(backup)
+            data = json.loads(path.read_text())
+            self.assertEqual("yes", data["env"]["KEEP_ME"])
+            self.assertNotIn("ANTHROPIC_API_KEY", data["env"])
+            self.assertEqual(
+                "/private/router/ica-router client-token", data["apiKeyHelper"]
+            )
+            self.assertEqual(routerctl.DEFAULT_CLAUDE_MODEL, data["env"]["ANTHROPIC_MODEL"])
+            if os.name != "nt":
+                self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
+
+    def test_configure_harnesses_prevalidates_all_targets_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "router"
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True)
+            wrapper = root / "ica-router"
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o700)
+            pi_path = Path(tmp) / "pi-models.json"
+            pi_original = '{"providers":{"keep":{"api":"x"}}}\n'
+            pi_path.write_text(pi_original)
+            claude_path = Path(tmp) / "claude-settings.json"
+            claude_path.write_text('{"env":"malformed"}\n')
+            runtime = {
+                "schemaVersion": 1,
+                "host": "127.0.0.1",
+                "port": 4000,
+                "maxFallbacks": 2,
+                "cooldownSeconds": 60,
+            }
+            args = types.SimpleNamespace(
+                state_dir=state_dir,
+                catalog=ROOT / "catalog.json",
+                all=False,
+                pi=True,
+                prime=False,
+                claude_code=True,
+                codex=False,
+                pi_models=pi_path,
+                prime_models=None,
+                claude_settings=claude_path,
+                codex_profile=None,
+                claude_model=routerctl.DEFAULT_CLAUDE_MODEL,
+                codex_model=routerctl.DEFAULT_CODEX_MODEL,
+            )
+            with mock.patch.object(
+                routerctl, "load_state", return_value=(self.catalog, self.secrets, runtime)
+            ):
+                with self.assertRaises(routerctl.ConfigError):
+                    routerctl.cmd_configure_harnesses(args)
+            self.assertEqual(pi_original, pi_path.read_text())
+            self.assertEqual([], list(pi_path.parent.glob("pi-models.json.backup-*")))
+
+    def test_configure_harnesses_rolls_back_an_earlier_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "router"
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True)
+            wrapper = root / "ica-router"
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o700)
+            pi_path = Path(tmp) / "pi-models.json"
+            pi_original = '{"providers":{"keep":{"api":"x"}}}\n'
+            pi_path.write_text(pi_original)
+            runtime = {
+                "schemaVersion": 1,
+                "host": "127.0.0.1",
+                "port": 4000,
+                "maxFallbacks": 2,
+                "cooldownSeconds": 60,
+            }
+            args = types.SimpleNamespace(
+                state_dir=state_dir,
+                catalog=ROOT / "catalog.json",
+                all=False,
+                pi=True,
+                prime=False,
+                claude_code=False,
+                codex=True,
+                pi_models=pi_path,
+                prime_models=None,
+                claude_settings=None,
+                codex_profile=Path(tmp) / "codex-profile.toml",
+                claude_model=routerctl.DEFAULT_CLAUDE_MODEL,
+                codex_model=routerctl.DEFAULT_CODEX_MODEL,
+            )
+            with (
+                mock.patch.object(
+                    routerctl, "load_state", return_value=(self.catalog, self.secrets, runtime)
+                ),
+                mock.patch.object(
+                    routerctl,
+                    "write_private_client_file",
+                    side_effect=routerctl.ConfigError("simulated Codex write failure"),
+                ),
+            ):
+                with self.assertRaises(routerctl.ConfigError):
+                    routerctl.cmd_configure_harnesses(args)
+            self.assertEqual(pi_original, pi_path.read_text())
+
+    def test_prime_models_path_implies_prime_only_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "router"
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True)
+            wrapper = root / "ica-router"
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o700)
+            prime_path = Path(tmp) / "prime-models.json"
+            runtime = {
+                "schemaVersion": 1,
+                "host": "127.0.0.1",
+                "port": 4000,
+                "maxFallbacks": 2,
+                "cooldownSeconds": 60,
+            }
+            args = types.SimpleNamespace(
+                state_dir=state_dir,
+                catalog=ROOT / "catalog.json",
+                all=False,
+                pi=False,
+                prime=False,
+                claude_code=False,
+                codex=False,
+                pi_models=None,
+                prime_models=prime_path,
+                claude_settings=None,
+                codex_profile=None,
+                claude_model=routerctl.DEFAULT_CLAUDE_MODEL,
+                codex_model=routerctl.DEFAULT_CODEX_MODEL,
+            )
+            with mock.patch.object(
+                routerctl, "load_state", return_value=(self.catalog, self.secrets, runtime)
+            ):
+                self.assertEqual(0, routerctl.cmd_configure_harnesses(args))
+            self.assertTrue(prime_path.is_file())
+            self.assertEqual(
+                {
+                    "ica-se-openai-router",
+                    "ica-se-claude-router",
+                    "ica-se-gemini-router",
+                },
+                set(json.loads(prime_path.read_text())["providers"]),
+            )
+
+    def test_windows_shell_helper_hides_metacharacter_path_in_encoded_command(self) -> None:
+        wrapper = Path(r"C:\private&name\%TEMP%\quote'name\ica-router.ps1")
+        command = routerctl.windows_client_token_command(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            wrapper,
+            bearer=True,
+        )
+        self.assertNotIn(str(wrapper), command)
+        encoded = command.split()[-1]
+        script = base64.b64decode(encoded).decode("utf-16le")
+        self.assertIn(str(wrapper).replace("'", "''"), script)
+        self.assertIn("client-token --bearer", script)
+
+    def test_codex_profile_uses_command_auth_and_keeps_qualified_model(self) -> None:
+        profile = routerctl.generate_codex_profile(
+            Path("/private/router/state"),
+            "http://127.0.0.1:4000/v1",
+            routerctl.DEFAULT_CODEX_MODEL,
+        )
+        self.assertIn('model = "ica-se-openai--gpt-5.6-sol"', profile)
+        self.assertIn('model_provider = "ica-router"', profile)
+        self.assertIn('wire_api = "responses"', profile)
+        self.assertIn('"client-token"', profile)
+        self.assertIn("request_max_retries = 0", profile)
+        self.assertNotIn(self.secrets["masterKey"], profile)
+        parsed = tomllib.loads(profile)
+        self.assertEqual(routerctl.DEFAULT_CODEX_MODEL, parsed["model"])
+        self.assertEqual("responses", parsed["model_providers"]["ica-router"]["wire_api"])
+
+    def test_systemd_unit_runs_foreground_router_and_waits_for_readiness(self) -> None:
+        if os.name == "nt":
+            self.skipTest("systemd user units are Linux-only")
+        with mock.patch.object(routerctl.sys, "platform", "linux"):
+            unit = routerctl.generate_systemd_user_unit(Path("/private/ICA Router/state"))
+        self.assertIn(routerctl.SYSTEMD_UNIT_MARKER, unit)
+        self.assertIn('ExecStart="/private/ICA Router/ica-router" run-foreground', unit)
+        self.assertIn("wait-ready --start-timeout 120", unit)
+        self.assertIn("Restart=on-failure", unit)
+        self.assertNotIn(self.secrets["masterKey"], unit)
+
+    def test_public_lifecycle_delegates_to_managed_systemd_unit(self) -> None:
+        if os.name == "nt":
+            self.skipTest("systemd user units are Linux-only")
+        args = types.SimpleNamespace(state_dir=Path("/private/router/state"))
+        calls: list[tuple[str, ...]] = []
+
+        def fake_systemctl(*arguments: str, check: bool = True) -> types.SimpleNamespace:
+            calls.append(arguments)
+            returncode = 1 if arguments and arguments[0] == "is-active" else 0
+            return types.SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+        with (
+            mock.patch.object(routerctl, "managed_systemd_user_unit", return_value=True),
+            mock.patch.object(routerctl, "run_systemctl", side_effect=fake_systemctl),
+            mock.patch.object(routerctl, "cmd_wait_ready", return_value=0) as wait_ready,
+            mock.patch.object(routerctl, "cmd_start_worker") as start_worker,
+            mock.patch.object(routerctl, "cmd_stop_worker") as stop_worker,
+        ):
+            self.assertEqual(0, routerctl.cmd_start(args))
+            self.assertEqual(0, routerctl.cmd_stop(args))
+        self.assertIn(("start", routerctl.SYSTEMD_UNIT_NAME), calls)
+        self.assertIn(("stop", routerctl.SYSTEMD_UNIT_NAME), calls)
+        wait_ready.assert_called_once_with(args)
+        start_worker.assert_not_called()
+        stop_worker.assert_not_called()
+
+    def test_install_systemd_user_writes_managed_unit_and_enables_it(self) -> None:
+        if os.name == "nt":
+            self.skipTest("systemd user units are Linux-only")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "router"
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True)
+            wrapper = root / "ica-router"
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o700)
+            config_home = Path(tmp) / "config"
+            calls: list[tuple[str, ...]] = []
+
+            def fake_systemctl(*arguments: str, check: bool = True) -> types.SimpleNamespace:
+                calls.append(arguments)
+                stdout = "active\n" if arguments and arguments[0] == "is-active" else ""
+                return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+            args = types.SimpleNamespace(
+                state_dir=state_dir,
+                catalog=ROOT / "catalog.json",
+                venv=root / ".venv",
+            )
+            runtime = {
+                "schemaVersion": 1,
+                "host": "127.0.0.1",
+                "port": 4000,
+                "maxFallbacks": 2,
+                "cooldownSeconds": 60,
+            }
+            with (
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}),
+                mock.patch.object(routerctl, "load_state", return_value=(self.catalog, self.secrets, runtime)),
+                mock.patch.object(routerctl, "cmd_stop_worker", return_value=0),
+                mock.patch.object(routerctl, "run_systemctl", side_effect=fake_systemctl),
+            ):
+                self.assertEqual(0, routerctl.cmd_install_systemd_user(args))
+            unit_path = config_home / "systemd/user" / routerctl.SYSTEMD_UNIT_NAME
+            self.assertTrue(unit_path.is_file())
+            self.assertIn(routerctl.SYSTEMD_UNIT_MARKER, unit_path.read_text())
+            self.assertIn(("daemon-reload",), calls)
+            self.assertIn(("enable", "--now", routerctl.SYSTEMD_UNIT_NAME), calls)
+
+    def test_install_systemd_user_removes_new_unit_when_start_fails(self) -> None:
+        if os.name == "nt":
+            self.skipTest("systemd user units are Linux-only")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "router"
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True)
+            wrapper = root / "ica-router"
+            wrapper.write_text("#!/bin/sh\n")
+            wrapper.chmod(0o700)
+            config_home = Path(tmp) / "config"
+
+            def fake_systemctl(*arguments: str, check: bool = True) -> types.SimpleNamespace:
+                if arguments[:2] == ("enable", "--now"):
+                    raise routerctl.ConfigError("simulated systemd start failure")
+                returncode = 1 if arguments and arguments[0] in {"is-enabled", "is-active"} else 0
+                return types.SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+            args = types.SimpleNamespace(
+                state_dir=state_dir,
+                catalog=ROOT / "catalog.json",
+                venv=root / ".venv",
+            )
+            runtime = {
+                "schemaVersion": 1,
+                "host": "127.0.0.1",
+                "port": 4000,
+                "maxFallbacks": 2,
+                "cooldownSeconds": 60,
+            }
+            with (
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config_home)}),
+                mock.patch.object(
+                    routerctl, "load_state", return_value=(self.catalog, self.secrets, runtime)
+                ),
+                mock.patch.object(routerctl, "cmd_stop_worker", return_value=0),
+                mock.patch.object(routerctl, "run_systemctl", side_effect=fake_systemctl),
+            ):
+                with self.assertRaisesRegex(routerctl.ConfigError, "simulated systemd"):
+                    routerctl.cmd_install_systemd_user(args)
+            unit_path = config_home / "systemd/user" / routerctl.SYSTEMD_UNIT_NAME
+            self.assertFalse(unit_path.exists())
 
     def test_imports_literal_rotator_without_printing_or_transforming_values(self) -> None:
         rotator = {
@@ -158,7 +506,7 @@ class RouterConfigTests(unittest.TestCase):
 
     def test_client_merge_is_idempotent_and_keeps_unrelated_provider(self) -> None:
         generated = routerctl.generate_client_providers(
-            self.catalog, self.secrets["masterKey"], "127.0.0.1", 4000
+            self.catalog, "127.0.0.1", 4000, Path("/private/router/state")
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "models.json"
@@ -606,6 +954,23 @@ class RouterConfigTests(unittest.TestCase):
             link.symlink_to(target)
             with self.assertRaises(routerctl.ConfigError):
                 routerctl.backup_file(link)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink semantics")
+    def test_client_path_rejects_final_symlink_but_canonicalizes_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_parent = root / "real"
+            real_parent.mkdir()
+            parent_alias = root / "parent-alias"
+            parent_alias.symlink_to(real_parent, target_is_directory=True)
+            resolved = routerctl.canonical_client_path(parent_alias / "models.json")
+            self.assertEqual(real_parent / "models.json", resolved)
+            target = real_parent / "target.json"
+            target.write_text("{}")
+            final_link = real_parent / "models.json"
+            final_link.symlink_to(target)
+            with self.assertRaises(routerctl.ConfigError):
+                routerctl.canonical_client_path(final_link)
 
 
 if __name__ == "__main__":
