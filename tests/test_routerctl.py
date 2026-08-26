@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import tomllib
 import types
@@ -971,6 +972,53 @@ class RouterConfigTests(unittest.TestCase):
             final_link.symlink_to(target)
             with self.assertRaises(routerctl.ConfigError):
                 routerctl.canonical_client_path(final_link)
+
+
+@unittest.skipUnless(os.name == "nt", "native Windows security APIs")
+class WindowsNativeSecurityTests(unittest.TestCase):
+    def test_acl_and_process_identity_do_not_spawn_shells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "private & %TEMP% [path] $ tick`"
+            private.mkdir()
+            secret = private / "secret.json"
+            secret.write_text("{}", encoding="utf-8")
+            with mock.patch.object(
+                routerctl.subprocess,
+                "run",
+                side_effect=AssertionError("native Windows checks must not spawn subprocesses"),
+            ):
+                routerctl.restrict_windows_directory(private)
+                routerctl.restrict_windows_file(secret)
+                routerctl.verify_windows_private_file(secret)
+                self.assertRegex(routerctl.current_windows_sid(), r"^S-1-(?:\d+-)+\d+$")
+                self.assertTrue(routerctl.process_alive(os.getpid()))
+                token = routerctl.process_start_token(os.getpid())
+                self.assertRegex(token or "", r"^windows:\d+$")
+                image = routerctl.windows_process_image(os.getpid())
+                self.assertIsNotNone(image)
+                document = {
+                    "pid": os.getpid(),
+                    "startToken": token,
+                    "executable": sys.executable,
+                    "configPath": str(secret),
+                }
+                matched, reason = routerctl.process_matches_run_state(document)
+                self.assertTrue(matched, reason)
+                wrong_token = dict(document, startToken="windows:0")
+                self.assertFalse(routerctl.process_matches_run_state(wrong_token)[0])
+                wrong_image = dict(document, executable=str(secret))
+                self.assertFalse(routerctl.process_matches_run_state(wrong_image)[0])
+                with mock.patch.object(routerctl, "_open_windows_process", return_value=(None, 87)):
+                    self.assertFalse(routerctl.process_alive(42424242))
+                with mock.patch.object(routerctl, "_open_windows_process", return_value=(None, 5)):
+                    self.assertTrue(routerctl.process_alive(42424242))
+                with mock.patch.object(routerctl, "_open_windows_process", return_value=(None, 8)):
+                    with self.assertRaises(routerctl.ConfigError):
+                        routerctl.process_alive(42424242)
+
+            child = routerctl.subprocess.Popen([sys.executable, "-I", "-c", "pass"])
+            child.wait(timeout=30)
+            self.assertFalse(routerctl.process_alive(child.pid))
 
 
 if __name__ == "__main__":

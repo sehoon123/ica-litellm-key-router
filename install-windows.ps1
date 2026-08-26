@@ -29,9 +29,21 @@ $ToolsDir = Join-Path $InstallRoot ("tools\uv-" + $UvVersion)
 $UvBin = Join-Path $ToolsDir "uv.exe"
 $TempSource = $null
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$CurrentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 
 if ($SourceRef -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
     throw "ICA_ROUTER_REF must be an exact vMAJOR.MINOR.PATCH tag"
+}
+
+if ($null -eq ('IcaRouterNativeFile' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class IcaRouterNativeFile {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool MoveFileEx(string existingPath, string newPath, int flags);
+}
+'@
 }
 
 function Write-Utf8File([string]$LiteralPath, [string]$Text) {
@@ -39,14 +51,18 @@ function Write-Utf8File([string]$LiteralPath, [string]$Text) {
 }
 
 function Replace-FileAtomic([string]$TemporaryPath, [string]$TargetPath) {
-    $temporaryDirectory = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($TemporaryPath))
-    $targetDirectory = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($TargetPath))
+    $temporaryFull = [System.IO.Path]::GetFullPath($TemporaryPath)
+    $targetFull = [System.IO.Path]::GetFullPath($TargetPath)
+    $temporaryDirectory = [System.IO.Path]::GetDirectoryName($temporaryFull)
+    $targetDirectory = [System.IO.Path]::GetDirectoryName($targetFull)
     if ($temporaryDirectory -ne $targetDirectory) { throw "atomic replacement requires the same directory" }
-    if (Test-Path -LiteralPath $TargetPath) {
-        Assert-NotReparse $TargetPath 'replacement target'
-        [System.IO.File]::Replace($TemporaryPath, $TargetPath, $null)
-    } else {
-        [System.IO.File]::Move($TemporaryPath, $TargetPath)
+    if (Test-Path -LiteralPath $targetFull) { Assert-NotReparse $targetFull 'replacement target' }
+    if (-not [IcaRouterNativeFile]::MoveFileEx($temporaryFull, $targetFull, 9)) {
+        $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw [System.ComponentModel.Win32Exception]::new(
+            $errorCode,
+            "atomic replacement failed: $temporaryFull -> $targetFull"
+        )
     }
 }
 
@@ -62,7 +78,7 @@ function Assert-NotReparse([string]$LiteralPath, [string]$Label) {
 function Set-PrivateAcl([string]$LiteralPath) {
     if (-not (Test-Path -LiteralPath $LiteralPath)) { return }
     Assert-NotReparse $LiteralPath "private path"
-    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $sid = $script:CurrentUserSid
     $item = Get-Item -Force -LiteralPath $LiteralPath
     if ($item.PSIsContainer) {
         $acl = New-Object System.Security.AccessControl.DirectorySecurity
@@ -90,13 +106,16 @@ function Set-PrivateAcl([string]$LiteralPath) {
         [System.IO.File]::SetAccessControl($LiteralPath, $acl)
     }
     $check = Get-Acl -LiteralPath $LiteralPath
-    $ownerSid = ([System.Security.Principal.NTAccount]$check.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    if (-not $check.AreAccessRulesProtected) { throw "private ACL still inherits access rules: $LiteralPath" }
+    $ownerSid = $check.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($ownerSid -ne $sid.Value) { throw "private ACL owner is not the current user: $LiteralPath" }
-    $allowed = @($check.Access | Where-Object { $_.AccessControlType -eq 'Allow' })
+    $allowed = @($check.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+        Where-Object { $_.AccessControlType -eq 'Allow' })
     if ($allowed.Count -eq 0) { throw "private ACL has no current-user allow rule: $LiteralPath" }
     foreach ($entry in $allowed) {
-        $entrySid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-        if ($entrySid -ne $sid.Value) { throw "private ACL still allows another principal: $LiteralPath" }
+        if ($entry.IdentityReference.Value -ne $sid.Value) {
+            throw "private ACL still allows another principal: $LiteralPath"
+        }
     }
 }
 
@@ -664,7 +683,12 @@ exit $LASTEXITCODE
 catch {
     $failure = $_
     if (($script:Switched -or $script:OldWasStopped) -and (Get-Command Restore-PreviousRelease -ErrorAction SilentlyContinue)) {
-        Restore-PreviousRelease
+        try {
+            Restore-PreviousRelease
+        }
+        catch {
+            Write-Warning ("rollback failed while preserving the original installer error: " + $_.Exception.Message)
+        }
     }
     throw $failure
 }

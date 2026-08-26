@@ -41,6 +41,8 @@ MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_KEYS_PER_POOL = 256
 DEPRECATED_POOL_IDS = {"ibm-ica-nextgen"}
 _WINDOWS_SID_CACHE: str | None = None
+_WINDOWS_SID_BYTES_CACHE: bytes | None = None
+_WINDOWS_API_CACHE: dict[str, Any] | None = None
 DEPRECATED_CLIENT_PROVIDER_IDS = {
     "ibm-ica-router",
     "ibm-ica-claude-router",
@@ -101,22 +103,6 @@ def windows_system_command(name: str) -> str:
     if not path.is_file():
         raise ConfigError(f"trusted Windows system command not found: {path}")
     return str(path)
-
-
-def windows_clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
-    system_dir = windows_system_directory()
-    windows_dir = system_dir.parent
-    environment = {
-        "SystemRoot": str(windows_dir),
-        "WINDIR": str(windows_dir),
-        "COMSPEC": str(system_dir / "cmd.exe"),
-        "PATH": str(system_dir),
-        "TEMP": os.environ.get("TEMP", str(windows_dir / "Temp")),
-        "TMP": os.environ.get("TMP", str(windows_dir / "Temp")),
-    }
-    if extra:
-        environment.update(extra)
-    return environment
 
 
 def posix_system_command(name: str) -> str:
@@ -953,28 +939,336 @@ def load_state(state_dir: Path, catalog_path: Path) -> tuple[dict[str, Any], dic
     return catalog, secrets_doc, runtime
 
 
+def _windows_api() -> dict[str, Any]:
+    """Load the small Win32 surface used for private ACL and process checks."""
+    global _WINDOWS_API_CACHE
+    if os.name != "nt":
+        raise ConfigError("Windows security API requested on a non-Windows host")
+    if _WINDOWS_API_CACHE is not None:
+        return _WINDOWS_API_CACHE
+
+    import ctypes
+    from ctypes import wintypes
+
+    class SID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_USER(ctypes.Structure):
+        _fields_ = [("User", SID_AND_ATTRIBUTES)]
+
+    class ACL(ctypes.Structure):
+        _fields_ = [
+            ("AclRevision", ctypes.c_ubyte),
+            ("Sbz1", ctypes.c_ubyte),
+            ("AclSize", wintypes.WORD),
+            ("AceCount", wintypes.WORD),
+            ("Sbz2", wintypes.WORD),
+        ]
+
+    class ACE_HEADER(ctypes.Structure):
+        _fields_ = [
+            ("AceType", ctypes.c_ubyte),
+            ("AceFlags", ctypes.c_ubyte),
+            ("AceSize", wintypes.WORD),
+        ]
+
+    class ACCESS_ALLOWED_ACE(ctypes.Structure):
+        _fields_ = [
+            ("Header", ACE_HEADER),
+            ("Mask", wintypes.DWORD),
+            ("SidStart", wintypes.DWORD),
+        ]
+
+    class ACL_SIZE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("AceCount", wintypes.DWORD),
+            ("AclBytesInUse", wintypes.DWORD),
+            ("AclBytesFree", wintypes.DWORD),
+        ]
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [
+            ("dwLowDateTime", wintypes.DWORD),
+            ("dwHighDateTime", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+        ctypes.POINTER(FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.GetLengthSid.argtypes = [ctypes.c_void_p]
+    advapi32.GetLengthSid.restype = wintypes.DWORD
+    advapi32.IsValidSid.argtypes = [ctypes.c_void_p]
+    advapi32.IsValidSid.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi32.EqualSid.restype = wintypes.BOOL
+    advapi32.InitializeAcl.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD]
+    advapi32.InitializeAcl.restype = wintypes.BOOL
+    advapi32.AddAccessAllowedAceEx.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    advapi32.AddAccessAllowedAceEx.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetAce.restype = wintypes.BOOL
+
+    _WINDOWS_API_CACHE = {
+        "ctypes": ctypes,
+        "wintypes": wintypes,
+        "kernel32": kernel32,
+        "advapi32": advapi32,
+        "TOKEN_USER": TOKEN_USER,
+        "ACL": ACL,
+        "ACE_HEADER": ACE_HEADER,
+        "ACCESS_ALLOWED_ACE": ACCESS_ALLOWED_ACE,
+        "ACL_SIZE_INFORMATION": ACL_SIZE_INFORMATION,
+        "FILETIME": FILETIME,
+    }
+    return _WINDOWS_API_CACHE
+
+
+def _windows_api_error(label: str, code: int | None = None) -> ConfigError:
+    import ctypes
+
+    value = ctypes.get_last_error() if code is None else code
+    detail = ctypes.FormatError(value).strip() if value else "unknown Windows error"
+    return ConfigError(f"{label} (Windows error {value}: {detail})")
+
+
+def _current_windows_sid_bytes() -> bytes:
+    global _WINDOWS_SID_BYTES_CACHE
+    if _WINDOWS_SID_BYTES_CACHE is not None:
+        return _WINDOWS_SID_BYTES_CACHE
+    api = _windows_api()
+    ctypes = api["ctypes"]
+    wintypes = api["wintypes"]
+    kernel32 = api["kernel32"]
+    advapi32 = api["advapi32"]
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise _windows_api_error("could not open the current Windows process token")
+    try:
+        needed = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        if needed.value == 0:
+            raise _windows_api_error("could not size the current Windows token user")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(
+            token, 1, buffer, needed.value, ctypes.byref(needed)
+        ):
+            raise _windows_api_error("could not read the current Windows token user")
+        token_user = ctypes.cast(buffer, ctypes.POINTER(api["TOKEN_USER"])).contents
+        sid_pointer = token_user.User.Sid
+        if not sid_pointer or not advapi32.IsValidSid(sid_pointer):
+            raise ConfigError("current Windows token contains an invalid SID")
+        sid_length = int(advapi32.GetLengthSid(sid_pointer))
+        if sid_length < 8:
+            raise ConfigError("current Windows token contains a truncated SID")
+        _WINDOWS_SID_BYTES_CACHE = ctypes.string_at(sid_pointer, sid_length)
+        return _WINDOWS_SID_BYTES_CACHE
+    finally:
+        kernel32.CloseHandle(token)
+
+
 def current_windows_sid() -> str:
     global _WINDOWS_SID_CACHE
     if _WINDOWS_SID_CACHE is not None:
         return _WINDOWS_SID_CACHE
-    result = subprocess.run(
-        [
-            windows_powershell(),
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
-        ],
-        capture_output=True,
-        text=True,
-        env=windows_clean_environment(),
-        check=False,
+    value = _current_windows_sid_bytes()
+    subauthority_count = value[1]
+    expected_length = 8 + subauthority_count * 4
+    if value[0] != 1 or len(value) != expected_length:
+        raise ConfigError("current Windows token contains an unsupported SID")
+    authority = int.from_bytes(value[2:8], "big")
+    subauthorities = [
+        int.from_bytes(value[offset : offset + 4], "little")
+        for offset in range(8, expected_length, 4)
+    ]
+    _WINDOWS_SID_CACHE = "S-1-" + str(authority) + "".join(
+        f"-{part}" for part in subauthorities
     )
-    sid = result.stdout.strip()
-    if result.returncode != 0 or not re.fullmatch(r"S-1-(?:\d+-)+\d+", sid):
-        raise ConfigError("could not resolve the current Windows user SID")
-    _WINDOWS_SID_CACHE = sid
-    return sid
+    return _WINDOWS_SID_CACHE
+
+
+def _windows_acl_check(path: Path, *, directory: bool, set_acl: bool) -> None:
+    api = _windows_api()
+    ctypes = api["ctypes"]
+    wintypes = api["wintypes"]
+    kernel32 = api["kernel32"]
+    advapi32 = api["advapi32"]
+    sid_bytes = _current_windows_sid_bytes()
+    sid_buffer = ctypes.create_string_buffer(sid_bytes)
+    sid_pointer = ctypes.cast(sid_buffer, ctypes.c_void_p)
+
+    if set_acl:
+        acl_size = (
+            ctypes.sizeof(api["ACL"])
+            + ctypes.sizeof(api["ACCESS_ALLOWED_ACE"])
+            - ctypes.sizeof(wintypes.DWORD)
+            + len(sid_bytes)
+        )
+        acl_buffer = ctypes.create_string_buffer(acl_size)
+        acl_pointer = ctypes.cast(acl_buffer, ctypes.c_void_p)
+        if not advapi32.InitializeAcl(acl_pointer, acl_size, 2):
+            raise _windows_api_error(f"could not initialize a private ACL for {path}")
+        inheritance = 0x03 if directory else 0
+        if not advapi32.AddAccessAllowedAceEx(
+            acl_pointer, 2, inheritance, 0x001F01FF, sid_pointer
+        ):
+            raise _windows_api_error(f"could not create a private ACL for {path}")
+        result = int(
+            advapi32.SetNamedSecurityInfoW(
+                str(path),
+                1,
+                0x00000001 | 0x00000004 | 0x80000000,
+                sid_pointer,
+                None,
+                acl_pointer,
+                None,
+            )
+        )
+        if result != 0:
+            raise _windows_api_error(f"could not restrict Windows ACL for {path}", result)
+
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    result = int(
+        advapi32.GetNamedSecurityInfoW(
+            str(path),
+            1,
+            0x00000001 | 0x00000004,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+    )
+    if result != 0:
+        raise _windows_api_error(f"could not inspect Windows ACL for {path}", result)
+    try:
+        if not owner.value or not advapi32.EqualSid(owner, sid_pointer):
+            raise ConfigError(f"private Windows path is not owned by the current user: {path}")
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not advapi32.GetSecurityDescriptorControl(
+            descriptor, ctypes.byref(control), ctypes.byref(revision)
+        ):
+            raise _windows_api_error(f"could not inspect Windows ACL control for {path}")
+        if not control.value & 0x1000:
+            raise ConfigError(f"private Windows path still inherits access rules: {path}")
+        if not dacl.value:
+            raise ConfigError(f"private Windows path has no explicit DACL: {path}")
+        information = api["ACL_SIZE_INFORMATION"]()
+        if not advapi32.GetAclInformation(
+            dacl,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            2,
+        ):
+            raise _windows_api_error(f"could not inspect Windows ACL entries for {path}")
+        if information.AceCount == 0:
+            raise ConfigError(f"private Windows path has no allow rule: {path}")
+        for index in range(int(information.AceCount)):
+            ace_pointer = ctypes.c_void_p()
+            if not advapi32.GetAce(dacl, index, ctypes.byref(ace_pointer)):
+                raise _windows_api_error(f"could not inspect Windows ACL entry for {path}")
+            header = ctypes.cast(
+                ace_pointer, ctypes.POINTER(api["ACE_HEADER"])
+            ).contents
+            if header.AceType != 0:
+                raise ConfigError(f"private Windows path has an unexpected ACL entry: {path}")
+            entry_sid = ctypes.c_void_p(
+                ace_pointer.value + api["ACCESS_ALLOWED_ACE"].SidStart.offset
+            )
+            if not advapi32.IsValidSid(entry_sid) or not advapi32.EqualSid(
+                entry_sid, sid_pointer
+            ):
+                raise ConfigError(f"private Windows path allows another principal: {path}")
+    finally:
+        if descriptor.value:
+            kernel32.LocalFree(descriptor)
 
 
 def restrict_windows_directory(path: Path) -> None:
@@ -982,99 +1276,11 @@ def restrict_windows_directory(path: Path) -> None:
         return
     if path.is_symlink() or not path.is_dir():
         raise ConfigError(f"private Windows directory is unsafe: {path}")
-    sid = current_windows_sid()
-    script = r"""
-$ErrorActionPreference = 'Stop'
-$target = $env:ICA_ROUTER_ACL_TARGET
-$sidText = $env:ICA_ROUTER_ACL_SID
-$sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
-$acl = New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetAccessRuleProtection($true, $false)
-$acl.SetOwner($sid)
-$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-  $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-[void]$acl.AddAccessRule($rule)
-[System.IO.Directory]::SetAccessControl($target, $acl)
-$check = Get-Acl -LiteralPath $target
-$ownerSid = ([System.Security.Principal.NTAccount]$check.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
-if ($ownerSid -ne $sidText) { exit 6 }
-$allowed = @($check.Access | Where-Object { $_.AccessControlType -eq 'Allow' })
-if ($allowed.Count -eq 0) { exit 7 }
-foreach ($entry in $allowed) {
-  $entrySid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-  if ($entrySid -ne $sidText) { exit 8 }
-}
-"""
-    result = subprocess.run(
-        [
-            windows_powershell(), "-NoProfile", "-NonInteractive", "-Command",
-            script,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=windows_clean_environment({
-            "ICA_ROUTER_ACL_TARGET": str(path),
-            "ICA_ROUTER_ACL_SID": sid,
-        }),
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip().replace("\n", " ")[:500]
-        raise ConfigError(
-            f"could not restrict Windows directory ACL for {path} (exit {result.returncode}): {detail}"
-        )
+    _windows_acl_check(path, directory=True, set_acl=True)
 
 
 def _run_windows_acl_check(path: Path, set_acl: bool) -> None:
-    sid = current_windows_sid()
-    script = r"""
-$ErrorActionPreference = 'Stop'
-$target = $env:ICA_ROUTER_ACL_TARGET
-$sidText = $env:ICA_ROUTER_ACL_SID
-$sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
-if ($env:ICA_ROUTER_ACL_MODE -eq 'set') {
-  $acl = New-Object System.Security.AccessControl.FileSecurity
-  $acl.SetAccessRuleProtection($true, $false)
-  $acl.SetOwner($sid)
-  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow')
-  [void]$acl.AddAccessRule($rule)
-  [System.IO.File]::SetAccessControl($target, $acl)
-}
-$check = Get-Acl -LiteralPath $target
-$ownerSid = ([System.Security.Principal.NTAccount]$check.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
-if ($ownerSid -ne $sidText) { exit 6 }
-$allowed = @($check.Access | Where-Object { $_.AccessControlType -eq 'Allow' })
-if ($allowed.Count -eq 0) { exit 7 }
-foreach ($entry in $allowed) {
-  $entrySid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-  if ($entrySid -ne $sidText) { exit 8 }
-}
-"""
-    result = subprocess.run(
-        [
-            windows_powershell(),
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=windows_clean_environment({
-            "ICA_ROUTER_ACL_TARGET": str(path),
-            "ICA_ROUTER_ACL_SID": sid,
-            "ICA_ROUTER_ACL_MODE": "set" if set_acl else "verify",
-        }),
-        check=False,
-    )
-    if result.returncode != 0:
-        action = "restrict" if set_acl else "verify"
-        detail = (result.stderr or "").strip().replace("\n", " ")[:500]
-        raise ConfigError(
-            f"could not {action} Windows ACL for {path} (exit {result.returncode}): {detail}"
-        )
+    _windows_acl_check(path, directory=False, set_acl=set_acl)
 
 
 def restrict_windows_file(path: Path) -> None:
@@ -1528,17 +1734,100 @@ def executable_for_venv(venv: Path) -> Path:
     raise ConfigError(f"LiteLLM executable not found in venv: {venv}")
 
 
+def _open_windows_process(pid: int) -> tuple[Any | None, int]:
+    api = _windows_api()
+    ctypes = api["ctypes"]
+    handle = api["kernel32"].OpenProcess(0x1000, False, pid)
+    return (handle, 0) if handle else (None, ctypes.get_last_error())
+
+
+def windows_process_image(pid: int) -> str | None:
+    if os.name != "nt" or pid <= 0:
+        return None
+    api = _windows_api()
+    ctypes = api["ctypes"]
+    wintypes = api["wintypes"]
+    kernel32 = api["kernel32"]
+    handle, _error = _open_windows_process(pid)
+    if not handle:
+        return None
+    try:
+        capacity = 32768
+        buffer = ctypes.create_unicode_buffer(capacity)
+        length = wintypes.DWORD(capacity)
+        if not kernel32.QueryFullProcessImageNameW(
+            handle, 0, buffer, ctypes.byref(length)
+        ):
+            return None
+        return buffer.value[: length.value] or None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_process_start_token(pid: int) -> str | None:
+    if pid <= 0:
+        return None
+    api = _windows_api()
+    ctypes = api["ctypes"]
+    kernel32 = api["kernel32"]
+    handle, _error = _open_windows_process(pid)
+    if not handle:
+        return None
+    try:
+        creation = api["FILETIME"]()
+        exit_time = api["FILETIME"]()
+        kernel_time = api["FILETIME"]()
+        user_time = api["FILETIME"]()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return None
+        filetime_ticks = (int(creation.dwHighDateTime) << 32) | int(
+            creation.dwLowDateTime
+        )
+        # Keep compatibility with the former PowerShell DateTime.Ticks token.
+        return f"windows:{filetime_ticks + 504911232000000000}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _normalized_windows_path(value: str) -> str:
+    import ntpath
+
+    normalized = value.replace("/", "\\")
+    if normalized.lower().startswith("\\\\?\\unc\\"):
+        normalized = "\\\\" + normalized[8:]
+    elif normalized.startswith("\\\\?\\"):
+        normalized = normalized[4:]
+    return ntpath.normcase(ntpath.normpath(normalized))
+
+
 def process_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        result = subprocess.run(
-            [windows_system_command("tasklist.exe"), "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.returncode == 0 and f'"{pid}"' in result.stdout
+        api = _windows_api()
+        ctypes = api["ctypes"]
+        wintypes = api["wintypes"]
+        kernel32 = api["kernel32"]
+        handle, error = _open_windows_process(pid)
+        if not handle:
+            if error == 87:  # ERROR_INVALID_PARAMETER: the PID does not exist.
+                return False
+            if error == 5:  # ERROR_ACCESS_DENIED still proves that the PID exists.
+                return True
+            raise _windows_api_error(f"could not inspect Windows PID {pid}", error)
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1622,6 +1911,8 @@ def command_lock(state_dir: Path) -> Iterator[None]:
             handle.close()
 
 def process_start_token(pid: int) -> str | None:
+    if os.name == "nt":
+        return _windows_process_start_token(pid)
     if not process_alive(pid):
         return None
     if sys.platform.startswith("linux"):
@@ -1635,54 +1926,31 @@ def process_start_token(pid: int) -> str | None:
             return f"linux:{boot_id}:{fields_after_comm[19]}"
         except (OSError, IndexError, UnicodeError):
             return None
-    if os.name == "nt":
-        command = (
-            f"$p=Get-Process -Id {pid} -ErrorAction Stop; "
-            "$p.StartTime.ToUniversalTime().Ticks"
-        )
-        result = subprocess.run(
-            [windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    else:
-        # macOS/BSD ps exposes only second resolution, so command and executable
-        # identity are also required before any signal is sent.
-        env = dict(os.environ)
-        env["LC_ALL"] = "C"
-        result = subprocess.run(
-            [posix_system_command("ps"), "-p", str(pid), "-o", "lstart="],
-            capture_output=True,
-            text=True,
-            env=env,
-            check=False,
-        )
+    # macOS/BSD ps exposes only second resolution, so command and executable
+    # identity are also required before any signal is sent.
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"
+    result = subprocess.run(
+        [posix_system_command("ps"), "-p", str(pid), "-o", "lstart="],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
     value = " ".join(result.stdout.split())
-    prefix = "windows" if os.name == "nt" else "posix"
-    return f"{prefix}:{value}" if result.returncode == 0 and value else None
+    return f"posix:{value}" if result.returncode == 0 and value else None
 
 def process_command_line(pid: int) -> str | None:
     if not process_alive(pid):
         return None
     if os.name == "nt":
-        command = (
-            f'$p=Get-CimInstance Win32_Process -Filter "ProcessId={pid}"; '
-            "if ($null -ne $p) { $p.CommandLine }"
-        )
-        result = subprocess.run(
-            [windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", command],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    else:
-        result = subprocess.run(
-            [posix_system_command("ps"), "-ww", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        return windows_process_image(pid)
+    result = subprocess.run(
+        [posix_system_command("ps"), "-ww", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     value = result.stdout.strip()
     return value if result.returncode == 0 and value else None
 
@@ -1709,6 +1977,17 @@ def process_matches_run_state(document: dict[str, Any]) -> tuple[bool, str]:
     token = process_start_token(pid)
     if token != document.get("startToken"):
         return False, "process creation time does not match"
+    if os.name == "nt":
+        image = windows_process_image(pid)
+        expected_image = str(document.get("executable", ""))
+        if not image or not expected_image:
+            return False, "process image is unavailable"
+        if _normalized_windows_path(image) != _normalized_windows_path(expected_image):
+            return False, "process image does not match the recorded router"
+        # PID + creation time identifies the exact process we launched. The
+        # private run record also binds its config path and digest, so a slow
+        # per-check WMI command-line lookup adds no meaningful identity signal.
+        return True, "matched"
     command_line = process_command_line(pid)
     if not command_line:
         return False, "process command line is unavailable"

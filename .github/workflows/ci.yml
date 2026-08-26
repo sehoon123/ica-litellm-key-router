@@ -510,7 +510,7 @@ jobs:
   windows-installer:
     name: Windows installer smoke test (dummy keys)
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
 
@@ -554,8 +554,11 @@ jobs:
 
       - name: Install, validate, and start with ephemeral dummy values
         shell: pwsh
+        timeout-minutes: 15
         run: |
           $ErrorActionPreference = "Stop"
+          $smokeStarted = Get-Date
+          Write-Host "Windows smoke start: $($smokeStarted.ToUniversalTime().ToString('o'))"
           $PSNativeCommandUseErrorActionPreference = $false
           # Exercise quoting through spaces and shell-significant path characters.
           $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
@@ -670,12 +673,13 @@ jobs:
             $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             $acl = Get-Acl -LiteralPath $LiteralPath
             if ($RequireProtected -and -not $acl.AreAccessRulesProtected) { throw "Private ACL still inherits: $LiteralPath" }
-            $ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            $ownerSid = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
             if ($ownerSid -ne $currentSid) { throw "Private ACL owner is not current user: $LiteralPath ($ownerSid)" }
-            $allowed = @($acl.Access | Where-Object { $_.AccessControlType -eq "Allow" })
+            $allowed = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+              Where-Object { $_.AccessControlType -eq "Allow" })
             if ($allowed.Count -eq 0) { throw "No allow ACE on private path: $LiteralPath" }
             foreach ($entry in $allowed) {
-              $entrySid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+              $entrySid = $entry.IdentityReference.Value
               if ($entrySid -ne $currentSid) { throw "Unexpected allow ACE on private path: $LiteralPath ($entrySid)" }
             }
           }
@@ -744,6 +748,25 @@ jobs:
           if ($lockedInstallExit -eq 0) { throw "Concurrent installer unexpectedly succeeded" }
           if ((Get-Content -Raw -LiteralPath $currentPointer).Trim() -ne $pointerBeforeLockTest) {
             throw "Rejected concurrent installer changed the current release"
+          }
+          Write-Host "Windows smoke elapsed: $([math]::Round(((Get-Date) - $smokeStarted).TotalSeconds, 2)) seconds"
+
+      - name: Dump private Windows diagnostics after failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
+          $state = Join-Path $installRoot "state"
+          $routerLog = Join-Path $state "router.log"
+          if (Test-Path -LiteralPath $routerLog) {
+            Write-Host "--- router.log (last 200 lines; CI uses dummy credentials) ---"
+            Get-Content -LiteralPath $routerLog -Tail 200
+          } else {
+            Write-Host "No router.log was created."
+          }
+          if (Test-Path -LiteralPath $state) {
+            Write-Host "--- private state filenames ---"
+            Get-ChildItem -Force -LiteralPath $state | Select-Object Name, Length, LastWriteTime
           }
 
       - name: Stop and remove ephemeral installation
