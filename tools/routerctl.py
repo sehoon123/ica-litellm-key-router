@@ -2193,10 +2193,16 @@ def serve_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str], 
     litellm = executable_for_venv(args.venv)
     host = str(runtime.get("host", DEFAULT_HOST))
     port = int(runtime.get("port", DEFAULT_PORT))
-    cmd = [
-        str(litellm),
-        "--config",
-        str(config_path),
+    cmd = [str(litellm)]
+    if os.name == "nt":
+        # The Windows console launcher expands %NAME% sequences in argv. A
+        # legal install path containing a literal value such as %TEMP% would
+        # therefore be rewritten before LiteLLM sees --config. Environment
+        # values are passed literally, and pinned LiteLLM loads this variable.
+        env["CONFIG_FILE_PATH"] = str(config_path)
+    else:
+        cmd.extend(["--config", str(config_path)])
+    cmd.extend([
         "--host",
         host,
         "--port",
@@ -2205,7 +2211,7 @@ def serve_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str], 
         "1",
         "--telemetry",
         "False",
-    ]
+    ])
     return cmd, env, runtime
 
 
