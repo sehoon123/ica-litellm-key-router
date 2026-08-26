@@ -1049,11 +1049,14 @@ class WindowsNativeSecurityTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["ICA_ROUTER_TEST_ACL_PATH"] = str(secret)
 
+            # Use .NET Framework APIs directly. GitHub's pwsh parent can export a
+            # PSModulePath whose PowerShell 7 Security module is incompatible with
+            # the trusted Windows PowerShell child used for this fixture.
             inherit_script = r"""
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH
+$acl = [System.IO.File]::GetAccessControl($env:ICA_ROUTER_TEST_ACL_PATH)
 $acl.SetAccessRuleProtection($false, $true)
-Set-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH -AclObject $acl
+[System.IO.File]::SetAccessControl($env:ICA_ROUTER_TEST_ACL_PATH, $acl)
 """
             result = routerctl.subprocess.run(
                 [routerctl.windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", inherit_script],
@@ -1070,12 +1073,12 @@ Set-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH -AclObject $acl
 
             foreign_allow_script = r"""
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH
+$acl = [System.IO.File]::GetAccessControl($env:ICA_ROUTER_TEST_ACL_PATH)
 $sid = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
   $sid, 'Read', [System.Security.AccessControl.AccessControlType]::Allow)
 [void]$acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH -AclObject $acl
+[System.IO.File]::SetAccessControl($env:ICA_ROUTER_TEST_ACL_PATH, $acl)
 """
             result = routerctl.subprocess.run(
                 [routerctl.windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", foreign_allow_script],
