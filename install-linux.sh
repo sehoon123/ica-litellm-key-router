@@ -651,10 +651,17 @@ SWITCHED=0
 OLD_STOPPED=0
 
 BIN_DIR="$HOME/.local/bin"
+COMMAND_LINK="$BIN_DIR/ica-router"
 mkdir -p -- "$BIN_DIR"
 chmod 700 "$BIN_DIR" 2>/dev/null || true
-if ln -sfn -- "$WRAPPER" "$BIN_DIR/ica-router" 2>/dev/null; then
-  say "Command installed: $BIN_DIR/ica-router"
+if [[ ! -e "$COMMAND_LINK" && ! -L "$COMMAND_LINK" ]]; then
+  if ln -s -- "$WRAPPER" "$COMMAND_LINK" 2>/dev/null; then
+    say "Command installed: $COMMAND_LINK"
+  fi
+elif [[ -L "$COMMAND_LINK" && "$(readlink -- "$COMMAND_LINK")" == "$WRAPPER" ]]; then
+  say "Command already current: $COMMAND_LINK"
+else
+  say "WARNING: preserving unrelated command path instead of replacing it: $COMMAND_LINK" >&2
 fi
 INSTALL_SUCCESS=1
 

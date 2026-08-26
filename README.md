@@ -294,7 +294,7 @@ Default layout:
 | Convenience symlink | `~/.local/bin/ica-router` |
 | Optional managed user unit | `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ica-litellm-key-router.service` |
 
-If `~/.local/bin` is not on `PATH`, invoke the direct wrapper or add the directory to `PATH`. The optional systemd unit name is user-global: the installer preserves it only when its `ExecStart` belongs to the same install root, never adopts it for an alternate root, and refuses an explicit `--systemd-user` takeover of another installation.
+If `~/.local/bin` is not on `PATH`, invoke the direct wrapper or add the directory to `PATH`. The installer never replaces an unrelated `~/.local/bin/ica-router` path. The optional systemd unit name is user-global: the installer preserves it only when its `ExecStart` belongs to the same install root, never adopts it for an alternate root, and refuses an explicit `--systemd-user` takeover of another installation.
 
 Useful overrides:
 

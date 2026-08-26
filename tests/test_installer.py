@@ -65,6 +65,12 @@ esac
         self.assertIn('(?:-rc\\.[0-9]+)?$', windows_source)
         self.assertIn('(?:-rc\\.[0-9]+)?(?:-local-[A-Za-z0-9-]+)?$', windows_source)
 
+    def test_convenience_command_never_replaces_an_unrelated_path(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        self.assertNotIn("ln -sfn", source)
+        self.assertIn("preserving unrelated command path instead of replacing it", source)
+        self.assertIn('[[ ! -e "$COMMAND_LINK" && ! -L "$COMMAND_LINK" ]]', source)
+
     def test_help_documents_systemd_user_option(self) -> None:
         result = subprocess.run(
             ["/bin/bash", str(INSTALLER), "--help"],

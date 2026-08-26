@@ -294,7 +294,7 @@ Installer 동작:
 | 편의 symlink | `~/.local/bin/ica-router` |
 | 선택 가능한 managed user unit | `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ica-litellm-key-router.service` |
 
-`~/.local/bin`이 `PATH`에 없으면 직접 wrapper를 실행하거나 해당 directory를 `PATH`에 추가하십시오. 선택 가능한 systemd unit 이름은 user 전체에서 하나입니다. Installer는 `ExecStart`가 같은 install root를 가리킬 때만 기존 unit을 보존하며, 다른 root에서 unit을 자동으로 가져오지 않고 다른 설치의 unit을 `--systemd-user`로 명시적으로 덮어쓰는 것도 거부합니다.
+`~/.local/bin`이 `PATH`에 없으면 직접 wrapper를 실행하거나 해당 directory를 `PATH`에 추가하십시오. Installer는 관련 없는 `~/.local/bin/ica-router` path를 덮어쓰지 않습니다. 선택 가능한 systemd unit 이름은 user 전체에서 하나입니다. Installer는 `ExecStart`가 같은 install root를 가리킬 때만 기존 unit을 보존하며, 다른 root에서 unit을 자동으로 가져오지 않고 다른 설치의 unit을 `--systemd-user`로 명시적으로 덮어쓰는 것도 거부합니다.
 
 Override 예:
 
