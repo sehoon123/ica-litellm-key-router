@@ -139,11 +139,11 @@ The installer preserves unrelated Pi providers and replaces only the three route
 
 ## Verify a release before installation
 
-For `v0.1.0`, the runtime source asset is:
+For `v0.1.1`, the runtime source asset is:
 
 ```text
-ica-litellm-key-router-v0.1.0.zip
-ica-litellm-key-router-v0.1.0.zip.sha256
+ica-litellm-key-router-v0.1.1.zip
+ica-litellm-key-router-v0.1.1.zip.sha256
 ```
 
 The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces, the exact ZIP filename, and a final newline. A release also contains standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, and `SHA256SUMS`; the latter covers the ZIP, ZIP sidecar, both installers, and manifest.
@@ -151,7 +151,7 @@ The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces,
 Linux example after downloading the ZIP and its sidecar:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.1.0.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.1.1.zip.sha256
 ```
 
 After downloading all release files named by `SHA256SUMS`, verify the complete set, including both standalone installers:
@@ -163,7 +163,7 @@ sha256sum --check --strict SHA256SUMS
 Windows example for the exact ZIP sidecar:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.1.0.zip'
+$asset = 'ica-litellm-key-router-v0.1.1.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -187,7 +187,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 A same-channel checksum detects corruption or inconsistent bytes; it does **not** independently authenticate the publisher. Before execution, also verify the exact tag/commit and a signature or artifact attestation from a trusted project identity. For a published GitHub artifact attestation, for example:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.1.0.zip \
+gh attestation verify ica-litellm-key-router-v0.1.1.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -206,14 +206,14 @@ Publishing is a release gate: run CI, reproduce the ZIP, verify the sidecar, tes
 From an extracted, verified release:
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.1.0
+cd /path/to/ica-litellm-key-router-v0.1.1
 bash ./install-linux.sh
 ```
 
-Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.1.0`):
+Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.1.1`):
 
 ```bash
-ICA_ROUTER_REF=v0.1.0 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.1.1 bash ./install-linux.sh
 ```
 
 On the first run, the installer asks for one key at a time for each catalog pool. Input is hidden. Press Enter on an empty key prompt after the last key in that pool. At least one key is required in each pool. It then generates all deployments and starts LiteLLM.
@@ -288,7 +288,7 @@ A leftover `<install-root>/.install.lock` directory after a crash blocks Linux i
 From an extracted, verified release:
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.1.0'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.1.1'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -325,7 +325,7 @@ Overrides:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.1.0' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.1.1' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```

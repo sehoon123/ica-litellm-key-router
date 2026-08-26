@@ -17,7 +17,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "ica-litellm-key-router"
 $RepoSlug = "sehoon123/ica-litellm-key-router"
-$SourceRef = if ($env:ICA_ROUTER_REF) { $env:ICA_ROUTER_REF } else { "v0.1.0" }
+$SourceRef = if ($env:ICA_ROUTER_REF) { $env:ICA_ROUTER_REF } else { "v0.1.1" }
 $LiteLLMVersion = "1.98.0"
 $PythonVersion = "3.12.13"
 $UvVersion = "0.12.2"
