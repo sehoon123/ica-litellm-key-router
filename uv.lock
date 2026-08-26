@@ -612,7 +612,7 @@ wheels = [
 
 [[package]]
 name = "ica-litellm-key-router-runtime"
-version = "0.2.2rc1"
+version = "0.2.2rc2"
 source = { virtual = "." }
 dependencies = [
     { name = "litellm", extra = ["proxy"] },

@@ -6,7 +6,7 @@ export PATH
 
 APP_NAME="ica-litellm-key-router"
 REPO_SLUG="sehoon123/ica-litellm-key-router"
-SOURCE_REF="${ICA_ROUTER_REF:-v0.2.2-rc.1}"
+SOURCE_REF="${ICA_ROUTER_REF:-v0.2.2-rc.2}"
 LITELLM_VERSION="1.98.0"
 PYTHON_VERSION="3.12.13"
 UV_VERSION="0.12.2"
@@ -30,7 +30,10 @@ INSTALL_LOCK_HELD=0
 FORCE_INSTALL=0
 REPLACE_KEYS=0
 SYSTEMD_USER=0
+SYSTEMD_EXPLICIT=0
 SYSTEMD_UNIT_EXISTED=0
+SYSTEMD_UNIT_OWNED=0
+SYSTEMD_TOUCH_UNIT=0
 SYSTEMD_WAS_ENABLED=0
 SYSTEMD_WAS_ACTIVE=0
 OLD_ROUTER_WAS_RUNNING=0
@@ -84,6 +87,7 @@ while (($#)); do
       ;;
     --systemd-user)
       SYSTEMD_USER=1
+      SYSTEMD_EXPLICIT=1
       shift
       ;;
     -h|--help)
@@ -166,15 +170,30 @@ print_models_hint() {
 SYSTEMD_UNIT_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ica-litellm-key-router.service"
 if [[ -f "$SYSTEMD_UNIT_PATH" && ! -L "$SYSTEMD_UNIT_PATH" ]]; then
   SYSTEMD_UNIT_EXISTED=1
+  unit_wrapper="${WRAPPER//%/%%}"
+  if grep -Fxq '# Managed by ICA LiteLLM Key Router' "$SYSTEMD_UNIT_PATH" \
+    && grep -Fxq "ExecStart=\"$unit_wrapper\" run-foreground" "$SYSTEMD_UNIT_PATH"; then
+    SYSTEMD_UNIT_OWNED=1
+  fi
+elif [[ "$SYSTEMD_EXPLICIT" == "1" && ( -e "$SYSTEMD_UNIT_PATH" || -L "$SYSTEMD_UNIT_PATH" ) ]]; then
+  die "unsafe systemd user unit: $SYSTEMD_UNIT_PATH"
 fi
-if [[ "$SYSTEMD_UNIT_EXISTED" == "1" && -x /usr/bin/systemctl ]]; then
-  if /usr/bin/systemctl --user is-enabled ica-litellm-key-router.service >/dev/null 2>&1; then
-    SYSTEMD_WAS_ENABLED=1
-    SYSTEMD_USER=1
+if [[ "$SYSTEMD_EXPLICIT" == "1" && "$SYSTEMD_UNIT_EXISTED" == "1" && "$SYSTEMD_UNIT_OWNED" != "1" ]]; then
+  die "systemd user unit belongs to another install root; refusing to replace it: $SYSTEMD_UNIT_PATH"
+fi
+if [[ "$SYSTEMD_UNIT_OWNED" == "1" ]]; then
+  SYSTEMD_TOUCH_UNIT=1
+  if [[ -x /usr/bin/systemctl ]]; then
+    if /usr/bin/systemctl --user is-enabled ica-litellm-key-router.service >/dev/null 2>&1; then
+      SYSTEMD_WAS_ENABLED=1
+      SYSTEMD_USER=1
+    fi
+    if /usr/bin/systemctl --user is-active ica-litellm-key-router.service >/dev/null 2>&1; then
+      SYSTEMD_WAS_ACTIVE=1
+    fi
   fi
-  if /usr/bin/systemctl --user is-active ica-litellm-key-router.service >/dev/null 2>&1; then
-    SYSTEMD_WAS_ACTIVE=1
-  fi
+elif [[ "$SYSTEMD_EXPLICIT" == "1" ]]; then
+  SYSTEMD_TOUCH_UNIT=1
 fi
 
 start_router() {
@@ -497,7 +516,7 @@ if [[ -n "$OLD_PY" && -f "$OLD_CONTROL" ]] \
 fi
 ROLLBACK_DIR="$INSTALL_ROOT/.rollback-$$"
 mkdir -m 700 -- "$ROLLBACK_DIR" "$ROLLBACK_DIR/state" "$ROLLBACK_DIR/clients"
-if [[ "$SYSTEMD_UNIT_EXISTED" == "1" ]]; then
+if [[ "$SYSTEMD_TOUCH_UNIT" == "1" && "$SYSTEMD_UNIT_EXISTED" == "1" ]]; then
   [[ -f "$SYSTEMD_UNIT_PATH" && ! -L "$SYSTEMD_UNIT_PATH" ]] \
     || die "unsafe systemd user unit: $SYSTEMD_UNIT_PATH"
   cp -- "$SYSTEMD_UNIT_PATH" "$ROLLBACK_DIR/systemd.unit"
@@ -549,7 +568,7 @@ rollback() {
       rm -f -- "$client_path"
     fi
   done
-  if [[ ( "$SYSTEMD_USER" == "1" || "$SYSTEMD_UNIT_EXISTED" == "1" ) && -x /usr/bin/systemctl ]]; then
+  if [[ "$SYSTEMD_TOUCH_UNIT" == "1" && -x /usr/bin/systemctl ]]; then
     /usr/bin/systemctl --user disable --now ica-litellm-key-router.service >/dev/null 2>&1
     if [[ "$SYSTEMD_UNIT_EXISTED" == "1" && -f "$ROLLBACK_DIR/systemd.unit" ]]; then
       mkdir -p -- "$(dirname -- "$SYSTEMD_UNIT_PATH")"

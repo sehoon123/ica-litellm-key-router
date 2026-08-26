@@ -85,6 +85,39 @@ esac
             self.assertEqual(log.read_text().splitlines(), ["doctor", "start", "status"])
             self.assertFalse((install / ".install.lock").exists())
 
+    def test_unrelated_managed_systemd_unit_is_not_adopted_or_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home, install, log = self.make_existing_install(Path(temporary))
+            unit = home / ".config" / "systemd" / "user" / "ica-litellm-key-router.service"
+            unit.parent.mkdir(parents=True)
+            original = (
+                "# Managed by ICA LiteLLM Key Router\n"
+                "[Service]\n"
+                'ExecStart="/different/install/root/ica-router" run-foreground\n'
+            )
+            unit.write_text(original, encoding="utf-8")
+            result = self.run_installer(home, install, log)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(original, unit.read_text(encoding="utf-8"))
+            self.assertEqual(["doctor", "start", "status"], log.read_text().splitlines())
+
+    def test_explicit_systemd_refuses_unit_from_another_install_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home, install, log = self.make_existing_install(Path(temporary))
+            unit = home / ".config" / "systemd" / "user" / "ica-litellm-key-router.service"
+            unit.parent.mkdir(parents=True)
+            original = (
+                "# Managed by ICA LiteLLM Key Router\n"
+                "[Service]\n"
+                'ExecStart="/different/install/root/ica-router" run-foreground\n'
+            )
+            unit.write_text(original, encoding="utf-8")
+            result = self.run_installer(home, install, log, "--systemd-user")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("belongs to another install root", result.stderr)
+            self.assertEqual(original, unit.read_text(encoding="utf-8"))
+            self.assertFalse(log.exists())
+
     def test_pi_models_option_creates_parent_and_runs_explicit_merge(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home, install, log = self.make_existing_install(Path(temporary))
