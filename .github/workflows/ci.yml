@@ -647,8 +647,8 @@ jobs:
           $modelCount = 0
           foreach ($provider in $clientConfig.providers.PSObject.Properties.Value) {
             $modelCount += @($provider.models).Count
-            if (-not ($provider.apiKey -like "!*client-token*")) {
-              throw "Generated provider does not use command-backed client authentication"
+            if ($provider.apiKey -ne $apiKeyCommand) {
+              throw "Generated providers do not share the validated command-backed authentication helper"
             }
           }
           if ($providerCount -ne 3) { throw "Expected 3 client providers, got $providerCount" }
