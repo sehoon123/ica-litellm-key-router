@@ -177,7 +177,7 @@ class RouterConfigTests(unittest.TestCase):
             root = Path(tmp) / "router"
             state_dir = root / "state"
             state_dir.mkdir(parents=True)
-            wrapper = root / "ica-router"
+            wrapper = root / ("ica-router.ps1" if os.name == "nt" else "ica-router")
             wrapper.write_text("#!/bin/sh\n")
             wrapper.chmod(0o700)
             pi_path = Path(tmp) / "pi-models.json"
@@ -220,7 +220,7 @@ class RouterConfigTests(unittest.TestCase):
             root = Path(tmp) / "router"
             state_dir = root / "state"
             state_dir.mkdir(parents=True)
-            wrapper = root / "ica-router"
+            wrapper = root / ("ica-router.ps1" if os.name == "nt" else "ica-router")
             wrapper.write_text("#!/bin/sh\n")
             wrapper.chmod(0o700)
             pi_path = Path(tmp) / "pi-models.json"
@@ -267,7 +267,7 @@ class RouterConfigTests(unittest.TestCase):
             root = Path(tmp) / "router"
             state_dir = root / "state"
             state_dir.mkdir(parents=True)
-            wrapper = root / "ica-router"
+            wrapper = root / ("ica-router.ps1" if os.name == "nt" else "ica-router")
             wrapper.write_text("#!/bin/sh\n")
             wrapper.chmod(0o700)
             prime_path = Path(tmp) / "prime-models.json"
@@ -380,7 +380,7 @@ class RouterConfigTests(unittest.TestCase):
             root = Path(tmp) / "router"
             state_dir = root / "state"
             state_dir.mkdir(parents=True)
-            wrapper = root / "ica-router"
+            wrapper = root / ("ica-router.ps1" if os.name == "nt" else "ica-router")
             wrapper.write_text("#!/bin/sh\n")
             wrapper.chmod(0o700)
             config_home = Path(tmp) / "config"
@@ -423,7 +423,7 @@ class RouterConfigTests(unittest.TestCase):
             root = Path(tmp) / "router"
             state_dir = root / "state"
             state_dir.mkdir(parents=True)
-            wrapper = root / "ica-router"
+            wrapper = root / ("ica-router.ps1" if os.name == "nt" else "ica-router")
             wrapper.write_text("#!/bin/sh\n")
             wrapper.chmod(0o700)
             config_home = Path(tmp) / "config"

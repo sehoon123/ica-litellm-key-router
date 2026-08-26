@@ -147,11 +147,11 @@ Codex 0.134.0 이상에서는 생성된 `~/.codex/ica-router.config.toml` profil
 
 ## 설치 전 release 검증
 
-`v0.2.0` runtime source asset 이름은 다음과 같습니다.
+`v0.2.1` runtime source asset 이름은 다음과 같습니다.
 
 ```text
-ica-litellm-key-router-v0.2.0.zip
-ica-litellm-key-router-v0.2.0.zip.sha256
+ica-litellm-key-router-v0.2.1.zip
+ica-litellm-key-router-v0.2.1.zip.sha256
 ```
 
 ZIP sidecar는 소문자 SHA-256 digest, 공백 두 개, 정확한 ZIP filename, 마지막 newline으로 이루어진 한 줄이어야 합니다. Release에는 standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, `SHA256SUMS`도 포함됩니다. `SHA256SUMS`는 ZIP, ZIP sidecar, installer 두 개, manifest를 모두 검증합니다.
@@ -159,7 +159,7 @@ ZIP sidecar는 소문자 SHA-256 digest, 공백 두 개, 정확한 ZIP filename,
 ZIP과 sidecar를 받은 뒤 Linux에서 확인하는 예:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.2.0.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.2.1.zip.sha256
 ```
 
 `SHA256SUMS`에 적힌 release 파일을 모두 받은 뒤 installer 두 개를 포함한 전체 set을 확인하십시오.
@@ -171,7 +171,7 @@ sha256sum --check --strict SHA256SUMS
 Windows에서 exact ZIP sidecar를 확인하는 예:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.2.0.zip'
+$asset = 'ica-litellm-key-router-v0.2.1.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -195,7 +195,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 같은 channel에서 받은 checksum은 파일 손상이나 byte 불일치를 찾지만 publisher identity를 독립적으로 인증하지는 않습니다. 실행하기 전에 정확한 tag/commit과 신뢰하는 프로젝트 identity의 signature 또는 artifact attestation도 확인하십시오. GitHub artifact attestation이 배포된 경우의 예:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.2.0.zip \
+gh attestation verify ica-litellm-key-router-v0.2.1.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -214,14 +214,14 @@ python scripts/build-release.py --output-dir dist
 검증하고 압축 해제한 release에서 실행합니다.
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.2.0
+cd /path/to/ica-litellm-key-router-v0.2.1
 bash ./install-linux.sh
 ```
 
-별도로 검증한 standalone installer도 사용할 수 있습니다. 옆에 완전한 source tree가 없으면 `ICA_ROUTER_REF`의 정확한 asset을 받습니다. 기본값은 `v0.2.0`입니다.
+별도로 검증한 standalone installer도 사용할 수 있습니다. 옆에 완전한 source tree가 없으면 `ICA_ROUTER_REF`의 정확한 asset을 받습니다. 기본값은 `v0.2.1`입니다.
 
 ```bash
-ICA_ROUTER_REF=v0.2.0 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.2.1 bash ./install-linux.sh
 ```
 
 최초 실행에서는 각 catalog pool의 key를 한 개씩 안전하게 입력받습니다. 입력 내용은 화면에 표시되지 않습니다. 해당 pool의 마지막 key 다음 prompt에서 아무것도 입력하지 않고 Enter를 누르면 입력이 끝납니다. 각 pool에는 최소 한 개의 key가 필요합니다. 이후 모든 deployment를 생성하고 LiteLLM을 시작합니다.
@@ -263,6 +263,8 @@ ica-router configure-harnesses --prime
 - Codex 0.134.0 이상에서 구독 기본값을 유지하는 별도 `~/.codex/ica-router.config.toml` profile.
 
 생성된 모든 인증 설정은 local master key를 저장하지 않고 `ica-router client-token`을 호출합니다. Codex profile은 router가 출력 전 재시도를 담당하므로 자체 request/stream retry를 비활성화합니다.
+
+현재 Apache Maka에는 command-backed model credential hook이나 안정적인 non-interactive model connection command가 없으므로 `configure-harnesses`가 변경 중인 workspace catalog 또는 plaintext credential vault를 직접 편집하지 않습니다. **Settings → Models**에서 provider type `openai-responses-compatible`, base URL `http://127.0.0.1:4000/v1`, model `ica-se-openai--gpt-5.6-sol`, API key에는 `ica-router client-token` 출력값을 한 번 설정하십시오. Maka에는 local router key 사본이 저장되지만 upstream IBM key rotation은 계속 이 router 한 곳에서 수행됩니다. 다른 Maka 프로젝트를 의미한다면 해당 프로젝트의 custom Responses endpoint contract를 별도로 확인해야 합니다.
 
 Installer 동작:
 
@@ -311,7 +313,7 @@ Crash 후 `<install-root>/.install.lock` directory가 남으면 Linux 설치가 
 검증하고 압축 해제한 release에서 실행합니다.
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.0'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.1'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -355,7 +357,7 @@ Override 예:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.0' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.1' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```

@@ -6,7 +6,7 @@ export PATH
 
 APP_NAME="ica-litellm-key-router"
 REPO_SLUG="sehoon123/ica-litellm-key-router"
-SOURCE_REF="${ICA_ROUTER_REF:-v0.2.0}"
+SOURCE_REF="${ICA_ROUTER_REF:-v0.2.1}"
 LITELLM_VERSION="1.98.0"
 PYTHON_VERSION="3.12.13"
 UV_VERSION="0.12.2"
