@@ -552,13 +552,13 @@ jobs:
             exit 1
           }
 
-      - name: Install, validate, and start with ephemeral dummy values
+      - name: Install twice with ephemeral dummy values
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 10
         run: |
           $ErrorActionPreference = "Stop"
-          $smokeStarted = Get-Date
-          Write-Host "Windows smoke start: $($smokeStarted.ToUniversalTime().ToString('o'))"
+          $phaseStarted = Get-Date
+          Write-Host "Windows install phase start: $($phaseStarted.ToUniversalTime().ToString('o'))"
           $PSNativeCommandUseErrorActionPreference = $false
           # Exercise quoting through spaces and shell-significant path characters.
           $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
@@ -612,6 +612,22 @@ jobs:
           if (@(Get-ChildItem -Directory -LiteralPath (Join-Path $installRoot "releases")).Count -ne 1) {
             throw "Fast path unexpectedly created another release directory"
           }
+          Write-Host "Windows install phase elapsed: $([math]::Round(((Get-Date) - $phaseStarted).TotalSeconds, 2)) seconds"
+          exit 0
+
+      - name: Validate Windows runtime, command authentication, and ACLs
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $phaseStarted = Get-Date
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
+          $currentPointer = Join-Path $installRoot "current"
+          $secondRelease = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
+          $clientRoot = Join-Path $HOME ".pi"
+          $clientAgentDir = Join-Path $clientRoot "agent"
+          $clientPath = Join-Path $clientAgentDir "models.json"
           $selectedRelease = Join-Path (Join-Path $installRoot "releases") $secondRelease
           $installedPython = Join-Path $selectedRelease ".venv\Scripts\python.exe"
           $pythonVersion = (& $installedPython -I -c 'import platform; print(platform.python_version())') -join ''
@@ -629,9 +645,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "status exited with $LASTEXITCODE" }
 
           $state = Join-Path $installRoot "state"
-          $managedRunPath = Join-Path $state "run.json"
-          $runTemplate = Get-Content -Raw -LiteralPath $managedRunPath | ConvertFrom-Json
-          $runAcl = Get-Acl -LiteralPath $managedRunPath
           $clientConfig = Get-Content -Raw -LiteralPath (Join-Path $state "client-models.generated.json") | ConvertFrom-Json
           $secretsConfig = Get-Content -Raw -LiteralPath (Join-Path $state "secrets.json") | ConvertFrom-Json
           $clientToken = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper client-token | Out-String).Trim()
@@ -705,6 +718,26 @@ jobs:
               ForEach-Object { $_.FullName }
           )
           foreach ($privatePath in $nestedStatePaths) { Assert-CurrentUserOnlyAcl $privatePath $false }
+          Write-Host "Windows validation phase elapsed: $([math]::Round(((Get-Date) - $phaseStarted).TotalSeconds, 2)) seconds"
+          exit 0
+
+      - name: Validate Windows lifecycle, update, and rollback
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $phaseStarted = Get-Date
+          $installRoot = Join-Path $env:RUNNER_TEMP 'ica router & ci %TEMP% [path] $ tick`'
+          $rotatorPath = Join-Path $env:RUNNER_TEMP 'key rotator [ci] $.json'
+          $sourceDirectory = (Resolve-Path .).Path
+          $currentPointer = Join-Path $installRoot "current"
+          $wrapper = Join-Path $installRoot "ica-router.ps1"
+          $state = Join-Path $installRoot "state"
+          $clientPath = Join-Path (Join-Path (Join-Path $HOME ".pi") "agent") "models.json"
+          $managedRunPath = Join-Path $state "run.json"
+          $runTemplate = Get-Content -Raw -LiteralPath $managedRunPath | ConvertFrom-Json
+          $runAcl = Get-Acl -LiteralPath $managedRunPath
 
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper stop
           if ($LASTEXITCODE -ne 0) { throw "stop exited with $LASTEXITCODE" }
@@ -749,7 +782,75 @@ jobs:
           if ((Get-Content -Raw -LiteralPath $currentPointer).Trim() -ne $pointerBeforeLockTest) {
             throw "Rejected concurrent installer changed the current release"
           }
-          Write-Host "Windows smoke elapsed: $([math]::Round(((Get-Date) - $smokeStarted).TotalSeconds, 2)) seconds"
+
+          # A forced update must atomically replace an existing current pointer.
+          $releaseBeforeUpdate = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
+            -InstallRoot $installRoot `
+            -SourceDirectory $sourceDirectory `
+            -KeyRotatorPath $rotatorPath `
+            -NonInteractive `
+            -PiModels `
+            -ForceInstall
+          if ($LASTEXITCODE -ne 0) { throw "Forced update exited with $LASTEXITCODE" }
+          $releaseAfterUpdate = (Get-Content -Raw -LiteralPath $currentPointer).Trim()
+          if ($releaseAfterUpdate -eq $releaseBeforeUpdate) { throw "Forced update did not switch releases" }
+          $releaseCountAfterUpdate = @(Get-ChildItem -Directory -LiteralPath (Join-Path $installRoot "releases")).Count
+          if ($releaseCountAfterUpdate -ne 2) { throw "Forced update should retain exactly two releases" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper status
+          if ($LASTEXITCODE -ne 0) { throw "Updated router status exited with $LASTEXITCODE" }
+
+          # A post-switch bootstrap failure must restore pointer, core state,
+          # requested client data, and a running prior router.
+          $coreStateNames = @(
+            "secrets.json", "config.yaml", "client-models.generated.json",
+            "runtime.json", "generation.json"
+          )
+          $stateSnapshots = @{}
+          foreach ($name in $coreStateNames) {
+            $path = Join-Path $state $name
+            $stateSnapshots[$name] = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
+          }
+          $clientSnapshot = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($clientPath))
+          $runBeforeRollback = Get-Content -Raw -LiteralPath (Join-Path $state "run.json") | ConvertFrom-Json
+          $invalidRotator = Join-Path $env:RUNNER_TEMP 'invalid key rotator [rollback] $.json'
+          [System.IO.File]::WriteAllText($invalidRotator, "{ intentionally invalid json", [System.Text.UTF8Encoding]::new($false))
+          $failureOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
+            -InstallRoot $installRoot `
+            -SourceDirectory $sourceDirectory `
+            -KeyRotatorPath $invalidRotator `
+            -NonInteractive `
+            -PiModels `
+            -ReplaceKeys `
+            -ForceInstall 2>&1 | Out-String)
+          $failureExit = $LASTEXITCODE
+          if ($failureExit -eq 0) { throw "Injected post-switch failure unexpectedly succeeded" }
+          if ($failureOutput -notmatch "configuration failed") {
+            throw "Injected failure did not preserve the original configuration error: $failureOutput"
+          }
+          if ($failureOutput -match "rollback failed while preserving") {
+            throw "Rollback itself failed: $failureOutput"
+          }
+          if ((Get-Content -Raw -LiteralPath $currentPointer).Trim() -ne $releaseAfterUpdate) {
+            throw "Rollback did not restore the previous current pointer"
+          }
+          foreach ($name in $coreStateNames) {
+            $path = Join-Path $state $name
+            $actual = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($path))
+            if ($actual -ne $stateSnapshots[$name]) { throw "Rollback did not restore state file: $name" }
+          }
+          $actualClient = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($clientPath))
+          if ($actualClient -ne $clientSnapshot) { throw "Rollback did not restore requested client data" }
+          if (@(Get-ChildItem -Directory -LiteralPath (Join-Path $installRoot "releases")).Count -ne $releaseCountAfterUpdate) {
+            throw "Rollback retained the failed staged release"
+          }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper status
+          if ($LASTEXITCODE -ne 0) { throw "Rolled-back router status exited with $LASTEXITCODE" }
+          $runAfterRollback = Get-Content -Raw -LiteralPath (Join-Path $state "run.json") | ConvertFrom-Json
+          if ($runAfterRollback.startToken -eq $runBeforeRollback.startToken) {
+            throw "Rollback did not restart the previously selected router"
+          }
+          Write-Host "Windows lifecycle/update/rollback phase elapsed: $([math]::Round(((Get-Date) - $phaseStarted).TotalSeconds, 2)) seconds"
           exit 0
 
       - name: Dump private Windows diagnostics after failure
@@ -785,4 +886,5 @@ jobs:
           }
           Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'key rotator [ci] $.json') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'invalid key rotator [rollback] $.json') -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath (Join-Path $HOME ".pi") -Recurse -Force -ErrorAction SilentlyContinue

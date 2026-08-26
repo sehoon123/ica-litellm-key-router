@@ -1020,6 +1020,78 @@ class WindowsNativeSecurityTests(unittest.TestCase):
             child.wait(timeout=30)
             self.assertFalse(routerctl.process_alive(child.pid))
 
+    def test_native_start_token_matches_legacy_powershell_ticks(self) -> None:
+        token = routerctl.process_start_token(os.getpid())
+        result = routerctl.subprocess.run(
+            [
+                routerctl.windows_powershell(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"(Get-Process -Id {os.getpid()} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(token, f"windows:{result.stdout.strip()}")
+
+    def test_native_acl_verifier_rejects_inheritance_and_foreign_allow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp) / "negative-acl"
+            private.mkdir()
+            secret = private / "secret.json"
+            secret.write_text("{}", encoding="utf-8")
+            routerctl.restrict_windows_directory(private)
+            routerctl.restrict_windows_file(secret)
+            environment = os.environ.copy()
+            environment["ICA_ROUTER_TEST_ACL_PATH"] = str(secret)
+
+            inherit_script = r"""
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH
+$acl.SetAccessRuleProtection($false, $true)
+Set-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH -AclObject $acl
+"""
+            result = routerctl.subprocess.run(
+                [routerctl.windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", inherit_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            with self.assertRaises(routerctl.ConfigError):
+                routerctl.verify_windows_private_file(secret)
+            routerctl.restrict_windows_file(secret)
+
+            foreign_allow_script = r"""
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH
+$sid = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+  $sid, 'Read', [System.Security.AccessControl.AccessControlType]::Allow)
+[void]$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $env:ICA_ROUTER_TEST_ACL_PATH -AclObject $acl
+"""
+            result = routerctl.subprocess.run(
+                [routerctl.windows_powershell(), "-NoProfile", "-NonInteractive", "-Command", foreign_allow_script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            try:
+                with self.assertRaises(routerctl.ConfigError):
+                    routerctl.verify_windows_private_file(secret)
+            finally:
+                routerctl.restrict_windows_file(secret)
+
 
 if __name__ == "__main__":
     unittest.main()
