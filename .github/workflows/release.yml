@@ -71,12 +71,20 @@ jobs:
         with:
           subject-path: "dist/*"
 
-      - name: Publish GitHub release
+      - name: Publish or reconcile GitHub release
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A manually published outage-recovery RC is reconciled with the
+            # deterministic CI build and receives provenance attestations.
+            gh release upload "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            release_flags=(--verify-tag --title "$GITHUB_REF_NAME" --generate-notes)
+            if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then release_flags+=(--prerelease); fi
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              "${release_flags[@]}"
+          fi

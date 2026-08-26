@@ -6,7 +6,7 @@ export PATH
 
 APP_NAME="ica-litellm-key-router"
 REPO_SLUG="sehoon123/ica-litellm-key-router"
-SOURCE_REF="${ICA_ROUTER_REF:-v0.2.2}"
+SOURCE_REF="${ICA_ROUTER_REF:-v0.2.2-rc.1}"
 LITELLM_VERSION="1.98.0"
 PYTHON_VERSION="3.12.13"
 UV_VERSION="0.12.2"
@@ -127,7 +127,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[[ "$SOURCE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "ICA_ROUTER_REF must be an exact vMAJOR.MINOR.PATCH tag"
+[[ "$SOURCE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || die "ICA_ROUTER_REF must be an exact vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N tag"
 [[ ! -L "$INSTALL_ROOT" ]] || die "install root must not be a symlink: $INSTALL_ROOT"
 for private_path in "$STATE_DIR" "$RELEASES_DIR" "$INSTALL_ROOT/tools" "$INSTALL_ROOT/cache"; do
   [[ ! -L "$private_path" ]] || die "private install path must not be a symlink: $private_path"

@@ -147,11 +147,13 @@ With Codex 0.134.0 or later, use `codex --profile ica-router` for the generated 
 
 ## Verify a release before installation
 
-For `v0.2.2`, the runtime source asset is:
+For `v0.2.2-rc.1`, the runtime source asset is:
+
+> `v0.2.2-rc.1` is a prerelease. Its initial assets may be published manually during a GitHub Actions outage; verify `SHA256SUMS`, the exact-tag manifest, and the annotated tag. GitHub provenance attestations become available after the release workflow recovers and reconciles the deterministic assets.
 
 ```text
-ica-litellm-key-router-v0.2.2.zip
-ica-litellm-key-router-v0.2.2.zip.sha256
+ica-litellm-key-router-v0.2.2-rc.1.zip
+ica-litellm-key-router-v0.2.2-rc.1.zip.sha256
 ```
 
 The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces, the exact ZIP filename, and a final newline. A release also contains standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, and `SHA256SUMS`; the latter covers the ZIP, ZIP sidecar, both installers, and manifest.
@@ -159,7 +161,7 @@ The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces,
 Linux example after downloading the ZIP and its sidecar:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.2.2.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.2.2-rc.1.zip.sha256
 ```
 
 After downloading all release files named by `SHA256SUMS`, verify the complete set, including both standalone installers:
@@ -171,7 +173,7 @@ sha256sum --check --strict SHA256SUMS
 Windows example for the exact ZIP sidecar:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.2.2.zip'
+$asset = 'ica-litellm-key-router-v0.2.2-rc.1.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -195,7 +197,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 A same-channel checksum detects corruption or inconsistent bytes; it does **not** independently authenticate the publisher. Before execution, also verify the exact tag/commit and a signature or artifact attestation from a trusted project identity. For a published GitHub artifact attestation, for example:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.2.2.zip \
+gh attestation verify ica-litellm-key-router-v0.2.2-rc.1.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -214,14 +216,14 @@ Publishing is a release gate: run CI, reproduce the ZIP, verify the sidecar, tes
 From an extracted, verified release:
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.2.2
+cd /path/to/ica-litellm-key-router-v0.2.2-rc.1
 bash ./install-linux.sh
 ```
 
-Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.2.2`):
+Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.2.2-rc.1`):
 
 ```bash
-ICA_ROUTER_REF=v0.2.2 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.2.2-rc.1 bash ./install-linux.sh
 ```
 
 On the first run, the installer asks for one key at a time for each catalog pool. Input is hidden. Press Enter on an empty key prompt after the last key in that pool. At least one key is required in each pool. It then generates all deployments and starts LiteLLM.
@@ -304,7 +306,7 @@ ICA_ROUTER_NON_INTERACTIVE=1 \
 bash ./install-linux.sh
 ```
 
-`ICA_ROUTER_REF` must be an exact `vMAJOR.MINOR.PATCH` tag. Set `ICA_ROUTER_NON_INTERACTIVE=1` only when a valid existing `secrets.json` or importable key-rotator document is available. Otherwise installation fails closed instead of prompting. Without that setting, secret entry requires a real terminal.
+`ICA_ROUTER_REF` must be an exact `vMAJOR.MINOR.PATCH` or `vMAJOR.MINOR.PATCH-rc.N` tag. Set `ICA_ROUTER_NON_INTERACTIVE=1` only when a valid existing `secrets.json` or importable key-rotator document is available. Otherwise installation fails closed instead of prompting. Without that setting, secret entry requires a real terminal.
 
 A leftover `<install-root>/.install.lock` directory after a crash blocks Linux installation. Confirm that no installer is running before removing it.
 
@@ -313,7 +315,7 @@ A leftover `<install-root>/.install.lock` directory after a crash blocks Linux i
 From an extracted, verified release:
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.2'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.2-rc.1'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -357,7 +359,7 @@ Overrides:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.2' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.2-rc.1' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```

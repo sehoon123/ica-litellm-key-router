@@ -17,7 +17,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "ica-litellm-key-router"
 $RepoSlug = "sehoon123/ica-litellm-key-router"
-$SourceRef = if ($env:ICA_ROUTER_REF) { $env:ICA_ROUTER_REF } else { "v0.2.2" }
+$SourceRef = if ($env:ICA_ROUTER_REF) { $env:ICA_ROUTER_REF } else { "v0.2.2-rc.1" }
 $LiteLLMVersion = "1.98.0"
 $PythonVersion = "3.12.13"
 $UvVersion = "0.12.2"
@@ -31,8 +31,8 @@ $TempSource = $null
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $CurrentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 
-if ($SourceRef -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
-    throw "ICA_ROUTER_REF must be an exact vMAJOR.MINOR.PATCH tag"
+if ($SourceRef -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?$') {
+    throw "ICA_ROUTER_REF must be an exact vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N tag"
 }
 
 if ($null -eq ('IcaRouterNativeFile' -as [type])) {
@@ -310,7 +310,7 @@ if (-not $ForceInstall -and
     Assert-NotReparse $ExistingWrapper 'existing wrapper'
     Assert-NotReparse $CurrentFile 'current pointer'
     $existingReleaseId = [System.IO.File]::ReadAllText($CurrentFile).Trim()
-    if ($existingReleaseId -match '^v[0-9]+\.[0-9]+\.[0-9]+(?:-local-[A-Za-z0-9-]+)?$') {
+    if ($existingReleaseId -match '^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?(?:-local-[A-Za-z0-9-]+)?$') {
         $ExistingRelease = Join-Path $ReleasesDir $existingReleaseId
         $existingComplete = Join-Path $ExistingRelease '.complete'
         $sourceChanged = $false
@@ -518,7 +518,7 @@ $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $CurrentFile = Join-Path $Root 'current'
 $ReleaseId = [System.IO.File]::ReadAllText($CurrentFile).Trim()
-if ($ReleaseId -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-local-[A-Za-z0-9-]+)?$') { throw 'Invalid current release pointer' }
+if ($ReleaseId -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?(?:-local-[A-Za-z0-9-]+)?$') { throw 'Invalid current release pointer' }
 $Release = Join-Path (Join-Path $Root 'releases') $ReleaseId
 $Python = Join-Path $Release '.venv\Scripts\python.exe'
 $Control = Join-Path $Release 'app\tools\routerctl.py'
@@ -538,7 +538,7 @@ exit $LASTEXITCODE
     if (Test-Path -LiteralPath $CurrentFile) {
         Assert-NotReparse $CurrentFile 'current pointer'
         $OldReleaseId = [System.IO.File]::ReadAllText($CurrentFile).Trim()
-        if ($OldReleaseId -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-local-[A-Za-z0-9-]+)?$') { throw "invalid existing current pointer" }
+        if ($OldReleaseId -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?(?:-local-[A-Za-z0-9-]+)?$') { throw "invalid existing current pointer" }
         $OldRelease = Join-Path $ReleasesDir $OldReleaseId
     }
     if ($OldRelease -and (Test-Path -LiteralPath (Join-Path $OldRelease '.venv\Scripts\python.exe'))) {

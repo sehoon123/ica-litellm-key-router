@@ -58,6 +58,13 @@ esac
             timeout=30,
         )
 
+    def test_release_candidate_reference_is_accepted_by_source_validation(self) -> None:
+        linux_source = INSTALLER.read_text(encoding="utf-8")
+        windows_source = WINDOWS_INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('(-rc\\.[0-9]+)?$', linux_source)
+        self.assertIn('(?:-rc\\.[0-9]+)?$', windows_source)
+        self.assertIn('(?:-rc\\.[0-9]+)?(?:-local-[A-Za-z0-9-]+)?$', windows_source)
+
     def test_help_documents_systemd_user_option(self) -> None:
         result = subprocess.run(
             ["/bin/bash", str(INSTALLER), "--help"],
