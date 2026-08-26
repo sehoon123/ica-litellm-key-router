@@ -750,6 +750,7 @@ jobs:
             throw "Rejected concurrent installer changed the current release"
           }
           Write-Host "Windows smoke elapsed: $([math]::Round(((Get-Date) - $smokeStarted).TotalSeconds, 2)) seconds"
+          exit 0
 
       - name: Dump private Windows diagnostics after failure
         if: failure()
