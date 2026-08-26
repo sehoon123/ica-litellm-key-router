@@ -357,6 +357,16 @@ def validate_catalog(catalog: Any) -> dict[str, Any]:
             model_id = model["id"]
             if model_id in seen_models:
                 raise ConfigError(f"duplicate model {provider_id}/{model_id}")
+            if api == "azure-openai-responses":
+                base_model = model.get("litellmBaseModel")
+                if not isinstance(base_model, str) or not SAFE_ID_RE.fullmatch(base_model):
+                    raise ConfigError(
+                        f"Azure model {provider_id}/{model_id} requires a valid litellmBaseModel"
+                    )
+            elif "litellmBaseModel" in model:
+                raise ConfigError(
+                    f"litellmBaseModel is only valid for Azure models: {provider_id}/{model_id}"
+                )
             seen_models.add(model_id)
             alias = model_alias(provider_id, model_id)
             if alias in aliases:
@@ -616,14 +626,18 @@ def generate_litellm_config(
                     "weight": 1,
                     "max_retries": 0,
                 }
+                model_info = {"id": deployment_id}
                 if provider["api"] == "azure-openai-responses":
                     # Pi's Azure Responses adapter uses the same stable version.
                     litellm_params["api_version"] = "v1"
+                    # ICA deployment aliases can differ from LiteLLM's canonical
+                    # Azure model IDs. This keeps token and cost metadata accurate.
+                    model_info["base_model"] = model["litellmBaseModel"]
                 model_list.append(
                     {
                         "model_name": alias,
                         "litellm_params": litellm_params,
-                        "model_info": {"id": deployment_id},
+                        "model_info": model_info,
                     }
                 )
     return {
@@ -702,6 +716,8 @@ def generate_client_providers(
             local["headers"] = {"Authorization": f"Bearer {master_key}"}
         for original in provider["models"]:
             model = copy.deepcopy(original)
+            # Router-only LiteLLM metadata is not part of Pi's model schema.
+            model.pop("litellmBaseModel", None)
             model["id"] = model_alias(provider_id, original["id"])
             model["name"] = f"{original.get('name', original['id'])} (key router)"
             local["models"].append(model)

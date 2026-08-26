@@ -12,7 +12,7 @@ IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인�
 ## 주요 기능
 
 - 기본적으로 정확히 한 개의 LiteLLM worker를 `127.0.0.1:4000`에서 실행합니다.
-- 로컬 client provider 3개와 provider-qualified model alias 11개를 제공합니다.
+- 로컬 client provider 3개와 provider-qualified model alias 12개를 제공합니다.
 - alias와 해당 pool의 credential 조합마다 LiteLLM deployment 하나를 만듭니다.
 - `simple-shuffle`로 정상 deployment를 무작위 선택합니다. round-robin이 아닙니다.
 - 지정된 오류가 발생하면 deployment를 즉시 cooldown하고, 출력 전 재시도가 가능한 오류를 재시도합니다.
@@ -74,23 +74,23 @@ OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사�
 
 이 라우터는 의도적으로 **single worker**만 사용합니다. 로컬 process identity, lock, cooldown state, controller는 multi-worker 또는 distributed 설계가 아닙니다.
 
-## Client provider 3개와 alias 11개 전체 목록
+## Client provider 3개와 alias 12개 전체 목록
 
 Bootstrap이 다음 provider ID를 만듭니다. Pi와 prime-agent에서는 model 이름 끝에 `(key router)`가 표시됩니다.
 
 | 로컬 client provider | 네이티브 API | Model alias |
 |---|---|---|
-| `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus` |
+| `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus`<br>`ica-se-openai--gpt-5.6-sol` |
 | `ica-se-claude-router` | Anthropic Messages | `ica-se-claude--claude-sonnet-4-6`<br>`ica-se-claude--claude-sonnet-5`<br>`ica-se-claude--claude-opus-4-6`<br>`ica-se-claude--claude-opus-4-8`<br>`ica-se-claude--claude-opus-5`<br>`ica-se-claude--claude-haiku-4-5` |
 | `ica-se-gemini-router` | Gemini `generateContent` | `ica-se-gemini--gemini-3.7-flash`<br>`ica-se-gemini--gemini-3.6-flash`<br>`ica-se-gemini--gemini-3.5-flash` |
 
 Deployment 수는 다음과 같습니다.
 
 ```text
-11 × ica-services-essentials key 수
+12 × ica-services-essentials key 수
 ```
 
-최소 한 개의 key를 넣으면 deployment 11개가 생성됩니다.
+최소 한 개의 key를 넣으면 deployment 12개가 생성됩니다.
 
 ## 요구 사항
 
@@ -103,6 +103,39 @@ Deployment 수는 다음과 같습니다.
 - 전용 tool cache와 보존되는 release별 environment를 위한 disk 공간.
 
 Installer 실행에 project용 Python을 미리 설치할 필요는 없습니다. Installer가 `uv` `0.12.2`를 검증하여 전용 위치에 설치하고, 정확한 Python `3.12.13`을 설치한 뒤 `uv sync --frozen --no-dev`, `uv pip check`를 실행하고 LiteLLM `1.98.0`을 확인합니다. Ambient `UV_*`, `PIP_*`, `PYTHON*` 설정은 dependency 선택에 사용되지 않습니다. 다른 OS와 shared-service 배포는 지원하지 않습니다.
+
+## 검토한 clone에서 빠르게 설치
+
+신뢰할 revision을 clone하고 검토한 뒤 해당 local source tree에서 설치합니다.
+
+```bash
+git clone https://github.com/sehoon123/ica-litellm-key-router.git
+cd ica-litellm-key-router
+```
+
+`~/.pi/agent/key-rotator.json`에 `ica-services-essentials` pool이 이미 있다면 다음 명령이 가장 짧은 비대화식 Pi 설치 방법입니다. 기존 key를 자동으로 import합니다.
+
+```bash
+ICA_ROUTER_NON_INTERACTIVE=1 bash ./install-linux.sh --pi-models
+```
+
+Import 가능한 key-rotator 파일이 없는 새 환경에서는 대화식으로 실행하고 prompt에 사용 권한이 있는 Services Essentials key를 입력합니다.
+
+```bash
+bash ./install-linux.sh --pi-models
+```
+
+Router 상태와 Pi를 통한 GPT-5.6 Sol 호출을 확인합니다.
+
+```bash
+$HOME/.local/share/ica-litellm-key-router/ica-router doctor
+$HOME/.local/share/ica-litellm-key-router/ica-router status
+pi --print \
+  --model 'ica-se-openai-router/ica-se-openai--gpt-5.6-sol' \
+  'Reply with exactly: OK'
+```
+
+Installer는 관련 없는 Pi provider를 보존하고 router가 소유하는 provider 3개만 교체합니다. Clone 경로는 설치 source일 뿐이며 runtime state는 `$HOME/.local/share/ica-litellm-key-router` 아래에 저장됩니다.
 
 ## 설치 전 release 검증
 

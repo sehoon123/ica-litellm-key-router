@@ -12,7 +12,7 @@ The router does not issue credentials. Use only credentials and IBM services tha
 ## What it does
 
 - Runs exactly one LiteLLM worker on `127.0.0.1:4000` by default.
-- Exposes three local client providers and 11 provider-qualified model aliases.
+- Exposes three local client providers and 12 provider-qualified model aliases.
 - Creates one LiteLLM deployment per alias and credential in that alias's pool.
 - Selects a healthy deployment randomly with `simple-shuffle`; this is not round-robin.
 - Cools down a deployment immediately after configured failure classes and retries eligible pre-output failures.
@@ -74,23 +74,23 @@ A pre-output failure can be ambiguous. IBM may have accepted, executed, or bille
 
 The router deliberately uses a **single worker**. Its local process identity, lock, cooldown state, and controller are not a multi-worker or distributed design.
 
-## Client providers and all 11 aliases
+## Client providers and all 12 aliases
 
 Bootstrap generates these three provider IDs. Pi and prime-agent show their models under names ending in `(key router)`.
 
 | Local client provider | Native API | Model aliases |
 |---|---|---|
-| `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus` |
+| `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus`<br>`ica-se-openai--gpt-5.6-sol` |
 | `ica-se-claude-router` | Anthropic Messages | `ica-se-claude--claude-sonnet-4-6`<br>`ica-se-claude--claude-sonnet-5`<br>`ica-se-claude--claude-opus-4-6`<br>`ica-se-claude--claude-opus-4-8`<br>`ica-se-claude--claude-opus-5`<br>`ica-se-claude--claude-haiku-4-5` |
 | `ica-se-gemini-router` | Gemini `generateContent` | `ica-se-gemini--gemini-3.7-flash`<br>`ica-se-gemini--gemini-3.6-flash`<br>`ica-se-gemini--gemini-3.5-flash` |
 
 Deployment count is:
 
 ```text
-11 × number of ica-services-essentials keys
+12 × number of ica-services-essentials keys
 ```
 
-The required minimum of one key produces 11 deployments.
+The required minimum of one key produces 12 deployments.
 
 ## Requirements
 
@@ -103,6 +103,39 @@ The required minimum of one key produces 11 deployments.
 - Disk space for the private tool cache and a separate environment for each retained release.
 
 The installer does not need a preinstalled project Python. It verifies and privately installs `uv` `0.12.2`, installs exact Python `3.12.13`, runs `uv sync --frozen --no-dev`, runs `uv pip check`, and verifies LiteLLM `1.98.0`. Ambient `UV_*`, `PIP_*`, and `PYTHON*` settings do not select dependencies. Other operating systems and shared-service deployments are unsupported.
+
+## Quick start from a reviewed clone
+
+Clone and review the revision you intend to trust, then install from that local source tree:
+
+```bash
+git clone https://github.com/sehoon123/ica-litellm-key-router.git
+cd ica-litellm-key-router
+```
+
+If `~/.pi/agent/key-rotator.json` already contains the `ica-services-essentials` pool, the shortest non-interactive Pi setup imports it automatically:
+
+```bash
+ICA_ROUTER_NON_INTERACTIVE=1 bash ./install-linux.sh --pi-models
+```
+
+On a fresh machine without an importable key-rotator file, run interactively and enter the authorized Services Essentials keys when prompted:
+
+```bash
+bash ./install-linux.sh --pi-models
+```
+
+Verify the router and GPT-5.6 Sol through Pi:
+
+```bash
+$HOME/.local/share/ica-litellm-key-router/ica-router doctor
+$HOME/.local/share/ica-litellm-key-router/ica-router status
+pi --print \
+  --model 'ica-se-openai-router/ica-se-openai--gpt-5.6-sol' \
+  'Reply with exactly: OK'
+```
+
+The installer preserves unrelated Pi providers and replaces only the three router-owned providers. The clone path is only the installation source; runtime state is stored under `$HOME/.local/share/ica-litellm-key-router`.
 
 ## Verify a release before installation
 

@@ -155,8 +155,8 @@ jobs:
               for model in provider["models"]
           }
           client_providers = {f"{provider_id}-router" for provider_id in catalog["providers"]}
-          if len(aliases) != 11 or len(client_providers) != 3:
-              errors.append("catalog must generate exactly 11 aliases and 3 client providers")
+          if len(aliases) != 12 or len(client_providers) != 3:
+              errors.append("catalog must generate exactly 12 aliases and 3 client providers")
           for path in (root / "README.md", root / "README.ko.md"):
               if not path.is_file():
                   continue
@@ -411,9 +411,9 @@ jobs:
           assert platform.python_version() == "3.12.13"
           assert version("litellm") == "1.98.0"
           assert len(catalog["providers"]) == 3
-          assert len(aliases) == 11
+          assert len(aliases) == 12
           assert len(generated["providers"]) == 3
-          assert len(config["model_list"]) == 22
+          assert len(config["model_list"]) == 24
           assert set(secrets["pools"]) == {"ica-services-essentials"}
           assert all(len(pool["keys"]) == 2 for pool in secrets["pools"].values())
           assert "keep-ci-dummy" in client["providers"]
@@ -627,11 +627,11 @@ jobs:
             $modelCount += @($provider.models).Count
           }
           if ($providerCount -ne 3) { throw "Expected 3 client providers, got $providerCount" }
-          if ($modelCount -ne 11) { throw "Expected 11 model aliases, got $modelCount" }
+          if ($modelCount -ne 12) { throw "Expected 12 model aliases, got $modelCount" }
 
           $liteConfig = Get-Content -Raw (Join-Path $state "config.yaml") | ConvertFrom-Json
-          if (@($liteConfig.model_list).Count -ne 22) {
-            throw "Expected 22 deployments with two Services Essentials dummy keys"
+          if (@($liteConfig.model_list).Count -ne 24) {
+            throw "Expected 24 deployments with two Services Essentials dummy keys"
           }
 
           $mergedClient = Get-Content -Raw -LiteralPath $clientPath | ConvertFrom-Json

@@ -46,14 +46,14 @@ class RouterConfigTests(unittest.TestCase):
             },
         }
 
-    def test_catalog_has_only_services_essentials_providers_and_11_models(self) -> None:
+    def test_catalog_has_only_services_essentials_providers_and_12_models(self) -> None:
         self.assertEqual(3, len(self.catalog["providers"]))
-        self.assertEqual(11, sum(len(p["models"]) for p in self.catalog["providers"].values()))
+        self.assertEqual(12, sum(len(p["models"]) for p in self.catalog["providers"].values()))
 
     def test_config_expands_models_by_pool_keys_without_raw_secrets(self) -> None:
         config = routerctl.generate_litellm_config(self.catalog, self.secrets)
-        # 11 Services Essentials models * 3 keys.
-        self.assertEqual(33, len(config["model_list"]))
+        # 12 Services Essentials models * 3 keys.
+        self.assertEqual(36, len(config["model_list"]))
         rendered = json.dumps(config)
         self.assertNotIn("nextgen", rendered.lower())
         self.assertNotIn(self.secrets["masterKey"], rendered)
@@ -74,10 +74,24 @@ class RouterConfigTests(unittest.TestCase):
             "/responses?_litellm_route=/openai/responses",
             openai_deployment["litellm_params"]["api_base"],
         )
+        expected_base_models = {
+            "ica-se-openai--gpt-5.6-luna-dzus": "gpt-5.6-luna",
+            "ica-se-openai--gpt-5.6-terra-dzus": "gpt-5.6-terra",
+            "ica-se-openai--gpt-5.6-sol": "gpt-5.6-sol",
+        }
+        for alias, base_model in expected_base_models.items():
+            deployment = next(item for item in config["model_list"] if item["model_name"] == alias)
+            self.assertEqual(base_model, deployment["model_info"]["base_model"])
 
     def test_model_alias_is_provider_qualified(self) -> None:
         alias = routerctl.model_alias("ica-se-openai", "gpt-5.6-luna-dzus")
         self.assertEqual("ica-se-openai--gpt-5.6-luna-dzus", alias)
+
+    def test_azure_catalog_model_requires_litellm_base_model(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        del catalog["providers"]["ica-se-openai"]["models"][0]["litellmBaseModel"]
+        with self.assertRaisesRegex(routerctl.ConfigError, "requires a valid litellmBaseModel"):
+            routerctl.validate_catalog(catalog)
 
     def test_client_protocol_bases_preserve_native_surfaces(self) -> None:
         generated = routerctl.generate_client_providers(
@@ -94,7 +108,8 @@ class RouterConfigTests(unittest.TestCase):
             f"Bearer {self.secrets['masterKey']}",
             generated["ica-se-gemini-router"]["headers"]["Authorization"],
         )
-        self.assertEqual(11, sum(len(p["models"]) for p in generated.values()))
+        self.assertEqual(12, sum(len(p["models"]) for p in generated.values()))
+        self.assertNotIn("litellmBaseModel", json.dumps(generated))
 
     def test_imports_literal_rotator_without_printing_or_transforming_values(self) -> None:
         rotator = {
