@@ -89,6 +89,8 @@ Bootstrap이 다음 provider ID를 만듭니다. Pi와 prime-agent에서는 mode
 | `ica-se-claude-router` | Anthropic Messages | `claude-sonnet-4-6`<br>`claude-sonnet-5`<br>`claude-opus-4-6`<br>`claude-opus-4-8`<br>`claude-opus-5`<br>`anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `ica-se-gemini-router` | Gemini `generateContent` | `gemini-3.7-flash`<br>`gemini-3.6-flash`<br>`gemini-3.5-flash` |
 
+생성되는 `ica-se-openai-router`의 Pi adapter는 의도적으로 `openai-responses`이며 `openai-completions`를 사용하지 않습니다. 여기에는 `openai-codex-responses`도 사용하면 안 됩니다. 이 adapter는 LiteLLM의 표준 `/v1/responses`가 아니라 ChatGPT의 `/codex/responses` endpoint와 OAuth account header용입니다.
+
 Deployment 수는 다음과 같습니다.
 
 ```text

@@ -168,6 +168,12 @@ class RouterConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(routerctl.ConfigError, "cannot contain ':'"):
             routerctl.validate_catalog(catalog)
 
+    def test_catalog_rejects_chat_completions_for_ica_routes(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        catalog["providers"]["ica-se-openai"]["api"] = "openai-completions"
+        with self.assertRaisesRegex(routerctl.ConfigError, "unsupported api"):
+            routerctl.validate_catalog(catalog)
+
     def test_azure_catalog_model_requires_litellm_base_model(self) -> None:
         catalog = json.loads(json.dumps(self.catalog))
         del catalog["providers"]["ica-se-openai"]["models"][0]["litellmBaseModel"]
@@ -198,6 +204,9 @@ class RouterConfigTests(unittest.TestCase):
         )["providers"]
         self.assertEqual("http://127.0.0.1:4000/v1", generated["ica-se-openai-router"]["baseUrl"])
         self.assertEqual("openai-responses", generated["ica-se-openai-router"]["api"])
+        self.assertEqual("anthropic-messages", generated["ica-se-claude-router"]["api"])
+        self.assertEqual("google-generative-ai", generated["ica-se-gemini-router"]["api"])
+        self.assertNotIn("openai-completions", {p["api"] for p in generated.values()})
         self.assertEqual("http://127.0.0.1:4000", generated["ica-se-claude-router"]["baseUrl"])
         for provider_id, provider in self.catalog["providers"].items():
             self.assertEqual(

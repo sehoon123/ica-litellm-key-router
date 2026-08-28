@@ -89,6 +89,8 @@ Bootstrap generates these three provider IDs. Pi and prime-agent show their mode
 | `ica-se-claude-router` | Anthropic Messages | `claude-sonnet-4-6`<br>`claude-sonnet-5`<br>`claude-opus-4-6`<br>`claude-opus-4-8`<br>`claude-opus-5`<br>`anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `ica-se-gemini-router` | Gemini `generateContent` | `gemini-3.7-flash`<br>`gemini-3.6-flash`<br>`gemini-3.5-flash` |
 
+The generated Pi adapter for `ica-se-openai-router` is deliberately `openai-responses`, never `openai-completions`. Do not use `openai-codex-responses` here: that adapter targets ChatGPT's `/codex/responses` endpoint and OAuth account headers, not LiteLLM's standard `/v1/responses` endpoint.
+
 Deployment count is:
 
 ```text
