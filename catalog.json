@@ -17,7 +17,7 @@
       "api": "azure-openai-responses",
       "models": [
         {
-          "id": "gpt-5.6-luna-dzus",
+          "id": "gpt-5.6-luna",
           "litellmBaseModel": "gpt-5.6-luna",
           "name": "GPT-5.6 Luna (SE)",
           "reasoning": true,
@@ -36,7 +36,7 @@
           }
         },
         {
-          "id": "gpt-5.6-terra-dzus",
+          "id": "gpt-5.6-terra",
           "litellmBaseModel": "gpt-5.6-terra",
           "name": "GPT-5.6 Terra (SE)",
           "reasoning": true,
@@ -192,6 +192,7 @@
         },
         {
           "id": "claude-haiku-4-5",
+          "clientModelId": "anthropic.claude-haiku-4-5-20251001-v1:0",
           "name": "Claude Haiku 4.5 (SE)",
           "reasoning": true,
           "input": [

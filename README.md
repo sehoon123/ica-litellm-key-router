@@ -12,8 +12,8 @@ The router does not issue credentials. Use only credentials and IBM services tha
 ## What it does
 
 - Runs exactly one LiteLLM worker on `127.0.0.1:4000` by default.
-- Exposes three local client providers and 12 provider-qualified model aliases.
-- Creates one LiteLLM deployment per alias and credential in that alias's pool.
+- Exposes three local client providers and 12 client model IDs.
+- Creates one LiteLLM deployment per internal alias and credential in that alias's pool.
 - Selects a healthy deployment randomly with `simple-shuffle`; this is not round-robin.
 - Cools down a deployment immediately after configured failure classes and retries eligible pre-output failures.
 - Sets provider SDK retries to zero and disables weighted failover.
@@ -54,7 +54,7 @@ The loopback listener uses HTTP because it does not leave the host. Bootstrap an
 |---|---|---|
 | `ica-services-essentials` | `ica-se-openai`, `ica-se-claude`, `ica-se-gemini` | `https://api.servicesessentials.ibm.com/v1`, `https://api.servicesessentials.ibm.com`, `https://api.servicesessentials.ibm.com/v1beta` |
 
-The OpenAI entries use LiteLLM's Azure Responses transformer with API version `v1`. Provider-qualified aliases keep the OpenAI, Anthropic, and Gemini surfaces as distinct LiteLLM model groups. Treat changes to `catalog.json` as changes to credential destinations. `ibm-ica-nextgen` is deprecated and is not generated or contacted.
+The OpenAI entries use LiteLLM's Azure Responses transformer with API version `v1`. Clients use the model IDs returned by each API; catalog entries can set `clientModelId` when that differs from the upstream request ID. LiteLLM `model_group_alias` maps client IDs to provider-qualified internal groups so the OpenAI, Anthropic, and Gemini surfaces remain distinct. Catalog validation rejects duplicate client model IDs and IDs that shadow internal aliases. Treat changes to `catalog.json` as changes to credential destinations. `ibm-ica-nextgen` is deprecated and is not generated or contacted.
 The original IBM Services Essentials Responses endpoint is `https://api.servicesessentials.ibm.com/v1/responses`. Generated LiteLLM `api_base` values add `?_litellm_route=/openai/responses` only as a LiteLLM `1.98.0` URL-builder compatibility marker so its Azure transformer does not append a second `/openai/responses`. It is not an IBM API parameter; omit it from direct IBM calls.
 
 ### Routing and retry behavior
@@ -79,15 +79,15 @@ A pre-output failure can be ambiguous. IBM may have accepted, executed, or bille
 
 The router deliberately uses a **single worker**. Its local process identity, lock, cooldown state, and controller are not a multi-worker or distributed design.
 
-## Client providers and all 12 aliases
+## Client providers and all 12 model IDs
 
 Bootstrap generates these three provider IDs. Pi and prime-agent show their models under names ending in `(key router)`.
 
-| Local client provider | Native API | Model aliases |
+| Local client provider | Native API | Client model IDs |
 |---|---|---|
-| `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus`<br>`ica-se-openai--gpt-5.6-sol` |
-| `ica-se-claude-router` | Anthropic Messages | `ica-se-claude--claude-sonnet-4-6`<br>`ica-se-claude--claude-sonnet-5`<br>`ica-se-claude--claude-opus-4-6`<br>`ica-se-claude--claude-opus-4-8`<br>`ica-se-claude--claude-opus-5`<br>`ica-se-claude--claude-haiku-4-5` |
-| `ica-se-gemini-router` | Gemini `generateContent` | `ica-se-gemini--gemini-3.7-flash`<br>`ica-se-gemini--gemini-3.6-flash`<br>`ica-se-gemini--gemini-3.5-flash` |
+| `ica-se-openai-router` | OpenAI Responses | `gpt-5.6-luna`<br>`gpt-5.6-terra`<br>`gpt-5.6-sol` |
+| `ica-se-claude-router` | Anthropic Messages | `claude-sonnet-4-6`<br>`claude-sonnet-5`<br>`claude-opus-4-6`<br>`claude-opus-4-8`<br>`claude-opus-5`<br>`anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `ica-se-gemini-router` | Gemini `generateContent` | `gemini-3.7-flash`<br>`gemini-3.6-flash`<br>`gemini-3.5-flash` |
 
 Deployment count is:
 
@@ -142,7 +142,7 @@ Verify the router and GPT-5.6 Sol through Pi:
 $HOME/.local/share/ica-litellm-key-router/ica-router doctor
 $HOME/.local/share/ica-litellm-key-router/ica-router status
 pi --print \
-  --model 'ica-se-openai-router/ica-se-openai--gpt-5.6-sol' \
+  --model 'ica-se-openai-router/gpt-5.6-sol' \
   'Reply with exactly: OK'
 ```
 
@@ -269,7 +269,7 @@ ica-router configure-harnesses --prime
 
 All generated authentication settings call `ica-router client-token` instead of storing the local master key. The Codex profile disables its request and stream retries because the router already owns pre-output retries.
 
-Apache Maka currently has neither a command-backed model credential hook nor a stable non-interactive model-connection command, so `configure-harnesses` deliberately does not edit its evolving workspace catalog or plaintext credential vault. Configure it once under **Settings → Models** with provider type `openai-responses-compatible`, base URL `http://127.0.0.1:4000/v1`, model `ica-se-openai--gpt-5.6-sol`, and the output of `ica-router client-token` as its API key. Maka persists that local router key, but upstream IBM key rotation remains centralized in this router. If “Maka” refers to a different project, verify its custom Responses endpoint contract separately.
+Apache Maka currently has neither a command-backed model credential hook nor a stable non-interactive model-connection command, so `configure-harnesses` deliberately does not edit its evolving workspace catalog or plaintext credential vault. Configure it once under **Settings → Models** with provider type `openai-responses-compatible`, base URL `http://127.0.0.1:4000/v1`, model `gpt-5.6-sol`, and the output of `ica-router client-token` as its API key. Maka persists that local router key, but upstream IBM key rotation remains centralized in this router. If “Maka” refers to a different project, verify its custom Responses endpoint contract separately.
 
 The installer:
 
@@ -434,7 +434,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/responses \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ica-se-openai--gpt-5.6-luna-dzus",
+    "model": "gpt-5.6-luna",
     "input": "Reply with OK.",
     "stream": false
   }'
@@ -451,7 +451,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/messages \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ica-se-claude--claude-sonnet-4-6",
+    "model": "claude-sonnet-4-6",
     "max_tokens": 64,
     "messages": [{"role": "user", "content": "Reply with OK."}]
   }'
@@ -464,7 +464,7 @@ Endpoint: `POST /v1/messages`
 
 ```bash
 curl --fail-with-body \
-  'http://127.0.0.1:4000/v1beta/models/ica-se-gemini--gemini-3.7-flash:generateContent' \
+  'http://127.0.0.1:4000/v1beta/models/gemini-3.7-flash:generateContent' \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{

@@ -70,6 +70,24 @@ class RouterConfigTests(unittest.TestCase):
         self.assertEqual(2, config["router_settings"]["retry_policy"]["RateLimitErrorRetries"])
         self.assertEqual(0, config["router_settings"]["allowed_fails"])
         self.assertEqual(
+            {
+                routerctl.client_model_id(model): routerctl.model_alias(
+                    provider_id, model["id"]
+                )
+                for provider_id, provider in self.catalog["providers"].items()
+                for model in provider["models"]
+            },
+            config["router_settings"]["model_group_alias"],
+        )
+        self.assertTrue(
+            {
+                routerctl.DEFAULT_CLAUDE_MODEL,
+                routerctl.DEFAULT_CLAUDE_SONNET_MODEL,
+                routerctl.DEFAULT_CLAUDE_HAIKU_MODEL,
+                routerctl.DEFAULT_CODEX_MODEL,
+            }.issubset(config["router_settings"]["model_group_alias"])
+        )
+        self.assertEqual(
             [routerctl.NO_LOG_CALLBACK], config["litellm_settings"]["callbacks"]
         )
         self.assertTrue(
@@ -87,18 +105,68 @@ class RouterConfigTests(unittest.TestCase):
             "/responses?_litellm_route=/openai/responses",
             openai_deployment["litellm_params"]["api_base"],
         )
-        expected_base_models = {
-            "ica-se-openai--gpt-5.6-luna-dzus": "gpt-5.6-luna",
-            "ica-se-openai--gpt-5.6-terra-dzus": "gpt-5.6-terra",
-            "ica-se-openai--gpt-5.6-sol": "gpt-5.6-sol",
-        }
-        for alias, base_model in expected_base_models.items():
-            deployment = next(item for item in config["model_list"] if item["model_name"] == alias)
-            self.assertEqual(base_model, deployment["model_info"]["base_model"])
+        for model in self.catalog["providers"]["ica-se-openai"]["models"]:
+            alias = routerctl.model_alias("ica-se-openai", model["id"])
+            deployment = next(
+                item for item in config["model_list"] if item["model_name"] == alias
+            )
+            self.assertEqual(
+                f"azure/{model['id']}", deployment["litellm_params"]["model"]
+            )
+            self.assertEqual(
+                model["litellmBaseModel"], deployment["model_info"]["base_model"]
+            )
 
     def test_model_alias_is_provider_qualified(self) -> None:
-        alias = routerctl.model_alias("ica-se-openai", "gpt-5.6-luna-dzus")
-        self.assertEqual("ica-se-openai--gpt-5.6-luna-dzus", alias)
+        alias = routerctl.model_alias("ica-se-openai", "gpt-5.6-luna")
+        self.assertEqual("ica-se-openai--gpt-5.6-luna", alias)
+
+    def test_client_model_ids_must_be_globally_unique(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        duplicate = json.loads(json.dumps(catalog["providers"]["ica-se-claude"]))
+        catalog["providers"]["ica-se-claude-duplicate"] = duplicate
+        catalog["pools"][0]["providers"].append("ica-se-claude-duplicate")
+        with self.assertRaisesRegex(routerctl.ConfigError, "duplicate client model id"):
+            routerctl.validate_catalog(catalog)
+
+    def test_client_model_ids_must_be_unique_within_provider(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        models = catalog["providers"]["ica-se-claude"]["models"]
+        models[1]["clientModelId"] = routerctl.client_model_id(models[0])
+        with self.assertRaisesRegex(routerctl.ConfigError, "duplicate client model id"):
+            routerctl.validate_catalog(catalog)
+
+    def test_client_model_ids_cannot_shadow_internal_aliases(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        catalog["providers"]["ica-se-claude"]["models"][0][
+            "clientModelId"
+        ] = routerctl.model_alias("ica-se-openai", "gpt-5.6-sol")
+        with self.assertRaisesRegex(
+            routerctl.ConfigError, "client model id collides with internal alias"
+        ):
+            routerctl.validate_catalog(catalog)
+
+    def test_catalog_model_ids_must_be_safe_client_ids(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        catalog["providers"]["ica-se-claude"]["models"][0]["id"] = "bad model"
+        with self.assertRaisesRegex(routerctl.ConfigError, "invalid model id"):
+            routerctl.validate_catalog(catalog)
+
+    def test_catalog_client_model_ids_must_be_safe(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        catalog["providers"]["ica-se-claude"]["models"][0][
+            "clientModelId"
+        ] = "bad client model"
+        with self.assertRaisesRegex(routerctl.ConfigError, "invalid client model id"):
+            routerctl.validate_catalog(catalog)
+
+    def test_gemini_client_model_ids_cannot_contain_method_separator(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        catalog["providers"]["ica-se-gemini"]["models"][0][
+            "clientModelId"
+        ] = "gemini:bad"
+        with self.assertRaisesRegex(routerctl.ConfigError, "cannot contain ':'"):
+            routerctl.validate_catalog(catalog)
 
     def test_azure_catalog_model_requires_litellm_base_model(self) -> None:
         catalog = json.loads(json.dumps(self.catalog))
@@ -131,6 +199,14 @@ class RouterConfigTests(unittest.TestCase):
         self.assertEqual("http://127.0.0.1:4000/v1", generated["ica-se-openai-router"]["baseUrl"])
         self.assertEqual("openai-responses", generated["ica-se-openai-router"]["api"])
         self.assertEqual("http://127.0.0.1:4000", generated["ica-se-claude-router"]["baseUrl"])
+        for provider_id, provider in self.catalog["providers"].items():
+            self.assertEqual(
+                [routerctl.client_model_id(model) for model in provider["models"]],
+                [
+                    model["id"]
+                    for model in generated[f"{provider_id}-router"]["models"]
+                ],
+            )
         self.assertEqual(
             "http://127.0.0.1:4000/v1beta",
             generated["ica-se-gemini-router"]["baseUrl"],
@@ -146,6 +222,7 @@ class RouterConfigTests(unittest.TestCase):
         self.assertEqual(12, sum(len(p["models"]) for p in generated.values()))
         rendered = json.dumps(generated)
         self.assertNotIn("litellmBaseModel", rendered)
+        self.assertNotIn("clientModelId", rendered)
         self.assertNotIn(self.secrets["masterKey"], rendered)
 
     def test_client_token_reads_private_state_without_persisting_another_copy(self) -> None:
@@ -350,13 +427,13 @@ class RouterConfigTests(unittest.TestCase):
         self.assertIn(str(wrapper).replace("'", "''"), script)
         self.assertIn("client-token --bearer", script)
 
-    def test_codex_profile_uses_command_auth_and_keeps_qualified_model(self) -> None:
+    def test_codex_profile_uses_command_auth_and_upstream_model_id(self) -> None:
         profile = routerctl.generate_codex_profile(
             Path("/private/router/state"),
             "http://127.0.0.1:4000/v1",
             routerctl.DEFAULT_CODEX_MODEL,
         )
-        self.assertIn('model = "ica-se-openai--gpt-5.6-sol"', profile)
+        self.assertIn('model = "gpt-5.6-sol"', profile)
         self.assertIn('model_provider = "ica-router"', profile)
         self.assertIn('wire_api = "responses"', profile)
         self.assertIn('"client-token"', profile)

@@ -57,12 +57,13 @@ PROVIDER_PREFIX = {
 ALLOWED_APIS = frozenset(PROVIDER_PREFIX)
 PLACEHOLDER_RE = re.compile(r"(?:REPLACE[_-]?ME|YOUR[_-]?KEY|<[^>]+>)", re.I)
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_CLIENT_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 SYSTEMD_UNIT_NAME = "ica-litellm-key-router.service"
 SYSTEMD_UNIT_MARKER = "# Managed by ICA LiteLLM Key Router"
-DEFAULT_CLAUDE_MODEL = "ica-se-claude--claude-opus-5"
-DEFAULT_CLAUDE_SONNET_MODEL = "ica-se-claude--claude-sonnet-5"
-DEFAULT_CLAUDE_HAIKU_MODEL = "ica-se-claude--claude-haiku-4-5"
-DEFAULT_CODEX_MODEL = "ica-se-openai--gpt-5.6-sol"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+DEFAULT_CLAUDE_SONNET_MODEL = "claude-sonnet-5"
+DEFAULT_CLAUDE_HAIKU_MODEL = "anthropic.claude-haiku-4-5-20251001-v1:0"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
 
 def windows_system_directory() -> Path:
@@ -283,6 +284,10 @@ def model_alias(provider_id: str, model_id: str) -> str:
     return f"{sanitize_id(provider_id)}--{sanitize_id(model_id)}"
 
 
+def client_model_id(model: dict[str, Any]) -> Any:
+    return model.get("clientModelId", model["id"])
+
+
 def key_env_name(pool_id: str, index: int) -> str:
     stem = re.sub(r"[^A-Za-z0-9]+", "_", pool_id).strip("_").upper()
     return f"ICA_ROUTER_{stem}_KEY_{index + 1:02d}"
@@ -299,6 +304,7 @@ def validate_catalog(catalog: Any) -> dict[str, Any]:
     pool_env_prefixes: set[str] = set()
     referenced: set[str] = set()
     aliases: set[str] = set()
+    client_model_ids: set[str] = set()
     for pool in pools:
         if not isinstance(pool, dict) or not isinstance(pool.get("id"), str):
             raise ConfigError("each catalog pool requires a string id")
@@ -338,8 +344,20 @@ def validate_catalog(catalog: Any) -> dict[str, Any]:
             if not isinstance(model, dict) or not isinstance(model.get("id"), str):
                 raise ConfigError(f"provider {provider_id} has invalid model")
             model_id = model["id"]
+            if not SAFE_ID_RE.fullmatch(model_id):
+                raise ConfigError(f"invalid model id: {provider_id}/{model_id}")
             if model_id in seen_models:
                 raise ConfigError(f"duplicate model {provider_id}/{model_id}")
+            client_id = client_model_id(model)
+            if not isinstance(client_id, str) or not SAFE_CLIENT_MODEL_ID_RE.fullmatch(
+                client_id
+            ):
+                raise ConfigError(f"invalid client model id: {provider_id}/{client_id}")
+            if api == "google-generative-ai" and ":" in client_id:
+                raise ConfigError(f"Gemini client model id cannot contain ':': {client_id}")
+            if client_id in client_model_ids:
+                raise ConfigError(f"duplicate client model id: {client_id}")
+            client_model_ids.add(client_id)
             if api == "azure-openai-responses":
                 base_model = model.get("litellmBaseModel")
                 if not isinstance(base_model, str) or not SAFE_ID_RE.fullmatch(base_model):
@@ -355,6 +373,11 @@ def validate_catalog(catalog: Any) -> dict[str, Any]:
             if alias in aliases:
                 raise ConfigError(f"duplicate generated model alias: {alias}")
             aliases.add(alias)
+    collisions = client_model_ids & aliases
+    if collisions:
+        raise ConfigError(
+            f"client model id collides with internal alias: {sorted(collisions)[0]}"
+        )
     return catalog
 
 
@@ -582,12 +605,14 @@ def generate_litellm_config(
     )
     provider_pool = pool_by_provider(catalog)
     model_list: list[dict[str, Any]] = []
+    model_group_alias: dict[str, str] = {}
     for provider_id, provider in catalog["providers"].items():
         pool_id = provider_pool[provider_id]
         keys = secrets_doc["pools"][pool_id]["keys"]
         prefix = PROVIDER_PREFIX[provider["api"]]
         for model in provider["models"]:
             alias = model_alias(provider_id, model["id"])
+            model_group_alias[client_model_id(model)] = alias
             upstream_model = prefix + model["id"]
             upstream_base = provider["baseUrl"]
             if provider["api"] == "azure-openai-responses":
@@ -631,6 +656,7 @@ def generate_litellm_config(
         "model_list": model_list,
         "router_settings": {
             "routing_strategy": "simple-shuffle",
+            "model_group_alias": model_group_alias,
             # Router-owned retries select another healthy sibling after the
             # failed deployment is cooled down. Provider SDK retries remain 0.
             "num_retries": effective_fallbacks,
@@ -773,7 +799,8 @@ def generate_client_providers(
             model = copy.deepcopy(original)
             # Router-only LiteLLM metadata is not part of Pi's model schema.
             model.pop("litellmBaseModel", None)
-            model["id"] = model_alias(provider_id, original["id"])
+            model.pop("clientModelId", None)
+            model["id"] = client_model_id(original)
             model["name"] = f"{original.get('name', original['id'])} (key router)"
             local["models"].append(model)
         providers[local_id] = local

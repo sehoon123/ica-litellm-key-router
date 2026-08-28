@@ -12,8 +12,8 @@ IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인�
 ## 주요 기능
 
 - 기본적으로 정확히 한 개의 LiteLLM worker를 `127.0.0.1:4000`에서 실행합니다.
-- 로컬 client provider 3개와 provider-qualified model alias 12개를 제공합니다.
-- alias와 해당 pool의 credential 조합마다 LiteLLM deployment 하나를 만듭니다.
+- 로컬 client provider 3개와 client model ID 12개를 제공합니다.
+- 내부 alias와 해당 pool의 credential 조합마다 LiteLLM deployment 하나를 만듭니다.
 - `simple-shuffle`로 정상 deployment를 무작위 선택합니다. round-robin이 아닙니다.
 - 지정된 오류가 발생하면 deployment를 즉시 cooldown하고, 출력 전 재시도가 가능한 오류를 재시도합니다.
 - provider SDK 재시도는 0이고 weighted failover는 비활성화합니다.
@@ -54,7 +54,7 @@ Loopback listener는 호스트 밖으로 나가지 않으므로 HTTP를 사용�
 |---|---|---|
 | `ica-services-essentials` | `ica-se-openai`, `ica-se-claude`, `ica-se-gemini` | `https://api.servicesessentials.ibm.com/v1`, `https://api.servicesessentials.ibm.com`, `https://api.servicesessentials.ibm.com/v1beta` |
 
-OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사용합니다. Provider-qualified alias는 OpenAI, Anthropic, Gemini 표면을 서로 다른 LiteLLM model group으로 유지합니다. `catalog.json` 변경은 credential 전송 대상 변경으로 간주하십시오. `ibm-ica-nextgen`은 deprecated되었으며 생성하거나 호출하지 않습니다.
+OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사용합니다. Client는 각 API 응답의 model ID를 사용하며, upstream 요청 ID와 다르면 catalog 항목의 `clientModelId`로 지정합니다. LiteLLM `model_group_alias`가 client ID를 provider-qualified 내부 group으로 매핑하므로 OpenAI, Anthropic, Gemini 표면은 분리됩니다. Catalog validation은 중복 client model ID와 내부 alias를 가리는 ID를 거부합니다. `catalog.json` 변경은 credential 전송 대상 변경으로 간주하십시오. `ibm-ica-nextgen`은 deprecated되었으며 생성하거나 호출하지 않습니다.
 원래 IBM Services Essentials Responses endpoint는 `https://api.servicesessentials.ibm.com/v1/responses`입니다. 생성된 LiteLLM `api_base`의 `?_litellm_route=/openai/responses`는 Azure transformer가 `/openai/responses`를 한 번 더 붙이지 않게 하는 LiteLLM `1.98.0` 전용 URL-builder compatibility marker입니다. IBM API parameter가 아니므로 IBM endpoint를 직접 호출할 때는 넣지 마십시오.
 
 ### Routing과 재시도 동작
@@ -79,15 +79,15 @@ OpenAI 항목은 API version `v1`과 LiteLLM Azure Responses transformer를 사�
 
 이 라우터는 의도적으로 **single worker**만 사용합니다. 로컬 process identity, lock, cooldown state, controller는 multi-worker 또는 distributed 설계가 아닙니다.
 
-## Client provider 3개와 alias 12개 전체 목록
+## Client provider 3개와 model ID 12개 전체 목록
 
 Bootstrap이 다음 provider ID를 만듭니다. Pi와 prime-agent에서는 model 이름 끝에 `(key router)`가 표시됩니다.
 
-| 로컬 client provider | 네이티브 API | Model alias |
+| 로컬 client provider | 네이티브 API | Client model ID |
 |---|---|---|
-| `ica-se-openai-router` | OpenAI Responses | `ica-se-openai--gpt-5.6-luna-dzus`<br>`ica-se-openai--gpt-5.6-terra-dzus`<br>`ica-se-openai--gpt-5.6-sol` |
-| `ica-se-claude-router` | Anthropic Messages | `ica-se-claude--claude-sonnet-4-6`<br>`ica-se-claude--claude-sonnet-5`<br>`ica-se-claude--claude-opus-4-6`<br>`ica-se-claude--claude-opus-4-8`<br>`ica-se-claude--claude-opus-5`<br>`ica-se-claude--claude-haiku-4-5` |
-| `ica-se-gemini-router` | Gemini `generateContent` | `ica-se-gemini--gemini-3.7-flash`<br>`ica-se-gemini--gemini-3.6-flash`<br>`ica-se-gemini--gemini-3.5-flash` |
+| `ica-se-openai-router` | OpenAI Responses | `gpt-5.6-luna`<br>`gpt-5.6-terra`<br>`gpt-5.6-sol` |
+| `ica-se-claude-router` | Anthropic Messages | `claude-sonnet-4-6`<br>`claude-sonnet-5`<br>`claude-opus-4-6`<br>`claude-opus-4-8`<br>`claude-opus-5`<br>`anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `ica-se-gemini-router` | Gemini `generateContent` | `gemini-3.7-flash`<br>`gemini-3.6-flash`<br>`gemini-3.5-flash` |
 
 Deployment 수는 다음과 같습니다.
 
@@ -142,7 +142,7 @@ Router 상태와 Pi를 통한 GPT-5.6 Sol 호출을 확인합니다.
 $HOME/.local/share/ica-litellm-key-router/ica-router doctor
 $HOME/.local/share/ica-litellm-key-router/ica-router status
 pi --print \
-  --model 'ica-se-openai-router/ica-se-openai--gpt-5.6-sol' \
+  --model 'ica-se-openai-router/gpt-5.6-sol' \
   'Reply with exactly: OK'
 ```
 
@@ -269,7 +269,7 @@ ica-router configure-harnesses --prime
 
 생성된 모든 인증 설정은 local master key를 저장하지 않고 `ica-router client-token`을 호출합니다. Codex profile은 router가 출력 전 재시도를 담당하므로 자체 request/stream retry를 비활성화합니다.
 
-현재 Apache Maka에는 command-backed model credential hook이나 안정적인 non-interactive model connection command가 없으므로 `configure-harnesses`가 변경 중인 workspace catalog 또는 plaintext credential vault를 직접 편집하지 않습니다. **Settings → Models**에서 provider type `openai-responses-compatible`, base URL `http://127.0.0.1:4000/v1`, model `ica-se-openai--gpt-5.6-sol`, API key에는 `ica-router client-token` 출력값을 한 번 설정하십시오. Maka에는 local router key 사본이 저장되지만 upstream IBM key rotation은 계속 이 router 한 곳에서 수행됩니다. 다른 Maka 프로젝트를 의미한다면 해당 프로젝트의 custom Responses endpoint contract를 별도로 확인해야 합니다.
+현재 Apache Maka에는 command-backed model credential hook이나 안정적인 non-interactive model connection command가 없으므로 `configure-harnesses`가 변경 중인 workspace catalog 또는 plaintext credential vault를 직접 편집하지 않습니다. **Settings → Models**에서 provider type `openai-responses-compatible`, base URL `http://127.0.0.1:4000/v1`, model `gpt-5.6-sol`, API key에는 `ica-router client-token` 출력값을 한 번 설정하십시오. Maka에는 local router key 사본이 저장되지만 upstream IBM key rotation은 계속 이 router 한 곳에서 수행됩니다. 다른 Maka 프로젝트를 의미한다면 해당 프로젝트의 custom Responses endpoint contract를 별도로 확인해야 합니다.
 
 Installer 동작:
 
@@ -434,7 +434,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/responses \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ica-se-openai--gpt-5.6-luna-dzus",
+    "model": "gpt-5.6-luna",
     "input": "Reply with OK.",
     "stream": false
   }'
@@ -451,7 +451,7 @@ curl --fail-with-body http://127.0.0.1:4000/v1/messages \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "ica-se-claude--claude-sonnet-4-6",
+    "model": "claude-sonnet-4-6",
     "max_tokens": 64,
     "messages": [{"role": "user", "content": "Reply with OK."}]
   }'
@@ -464,7 +464,7 @@ Endpoint: `POST /v1/messages`
 
 ```bash
 curl --fail-with-body \
-  'http://127.0.0.1:4000/v1beta/models/ica-se-gemini--gemini-3.7-flash:generateContent' \
+  'http://127.0.0.1:4000/v1beta/models/gemini-3.7-flash:generateContent' \
   -H "Authorization: Bearer ${ICA_ROUTER_MASTER_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{
