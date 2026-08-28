@@ -435,7 +435,7 @@ jobs:
           assert "keep-ci-dummy" in client["providers"]
           assert len(client["providers"]) == 4
           PY
-          (cd "$second_release/app" && "$python_bin" tests/test_litellm_no_log.py -v)
+          (cd "$GITHUB_WORKSPACE" && "$python_bin" tests/test_litellm_no_log.py -v)
           [[ "$("$install_root/tools/uv-0.12.2/uv" --version)" == "uv 0.12.2"* ]]
 
           shopt -s nullglob
