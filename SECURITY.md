@@ -150,6 +150,8 @@ The router restricts generated client files and backups. It also restricts the m
 
 The launcher supplies `LITELLM_LOG` and `LITELLM_LOG_LEVEL` as `ERROR`, sets production mode, and disables telemetry through environment and command-line controls. It gives LiteLLM private state-owned home/cache/temp directories. These controls reduce exposure; they do not prove that exceptions, dependency diagnostics, cached artifacts, temporary data, operating-system captures, or upstream error bodies contain no sensitive data.
 
+Generated deployments and a release-bundled post-routing callback force top-level `"no-log": true` in JSON bodies sent from local LiteLLM to ICA, including native OpenAI Responses, Anthropic Messages, and Gemini requests. The callback also prevents a local caller from overriding the value with `false`. This is a request to ICA, not proof that IBM, downstream model services, dependencies, or infrastructure retain nothing.
+
 `router.log` is private and rotates to one `router.log.1` after it exceeds 10 MiB and the router starts again. Redact before sharing. The project configures no hosted relay or request database, but it cannot guarantee that LiteLLM dependencies, local tooling, the OS, IBM, or model providers retain nothing.
 
 ## Catalog and generated-state integrity

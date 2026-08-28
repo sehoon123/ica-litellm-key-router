@@ -17,6 +17,7 @@ IBM ICA Services Essentials 요청을 여러 API key에 분산하는 로컬 인�
 - `simple-shuffle`로 정상 deployment를 무작위 선택합니다. round-robin이 아닙니다.
 - 지정된 오류가 발생하면 deployment를 즉시 cooldown하고, 출력 전 재시도가 가능한 오류를 재시도합니다.
 - provider SDK 재시도는 0이고 weighted failover는 비활성화합니다.
+- 로컬 LiteLLM worker에서 ICA로 보내는 모든 JSON body에 top-level `"no-log": true`를 강제로 넣습니다.
 - Raw upstream key를 생성된 `config.yaml`에 넣지 않습니다.
 - Command-backed client credential을 사용하므로 생성된 Pi, Claude Code, Codex 설정에 local master key 사본을 저장하지 않습니다.
 - 관련 없는 설정이나 Codex 구독 기본값을 교체하지 않고 Pi/prime-agent, Claude Code, 별도 Codex profile을 구성합니다.
@@ -42,6 +43,8 @@ IBM ICA Services Essentials HTTPS gateway
 `tools/routerctl.py`는 Python 표준 라이브러리만 사용하는 control plane입니다. LiteLLM은 data plane입니다. Installer는 versioned release를 만들고, private state를 생성하고, offline `doctor`를 실행한 후 라우터를 시작합니다.
 
 “로컬 전용”은 client-facing listener가 같은 호스트에 있다는 뜻입니다. Prompt, response, tool data, model metadata는 `catalog.json`이 선택한 IBM endpoint로 HTTPS를 통해 컴퓨터 밖으로 전송됩니다. 이 프로젝트에는 hosted relay나 database가 없습니다. Launcher는 고정 path, key 변수, 강제 production/error logging, telemetry control, state 아래의 private `process-home`, `process-cache`, `process-tmp`만 포함한 최소 LiteLLM child environment를 만듭니다. Ambient proxy/custom-CA 변수와 environment 기반 provider 기능은 상속되지 않으므로 정상 system trust 설정으로 IBM에 직접 HTTPS 연결할 수 있어야 합니다.
+
+생성되는 모든 deployment는 `extra_body`의 기본값을 `{"no-log": true}`로 설정합니다. Release에 포함된 callback은 LiteLLM이 deployment를 선택하고 request parameter를 병합한 뒤 이 값을 다시 적용하므로 들어오는 로컬 요청이 값을 덮어쓸 수 없습니다. 또한 LiteLLM `1.98.0`의 native Anthropic Messages allowlist를 보완하여 OpenAI Responses 및 Gemini와 동일한 top-level field를 ICA에 전달합니다. 이 설정은 local LiteLLM에서 ICA로 나가는 request body만 제어하며 ICA와 그 이후 upstream이 이 field를 준수하는지는 이 프로젝트의 trust boundary 밖입니다.
 
 Loopback listener는 호스트 밖으로 나가지 않으므로 HTTP를 사용합니다. Bootstrap과 runtime 검증은 `127.0.0.1` 이외의 host를 거부합니다. Port는 변경할 수 있습니다. 이 프로젝트는 TLS, 원격 접근 제어, multi-user isolation을 제공하지 않습니다.
 
@@ -147,13 +150,13 @@ Codex 0.134.0 이상에서는 생성된 `~/.codex/ica-router.config.toml` profil
 
 ## 설치 전 release 검증
 
-`v0.2.2-rc.3` runtime source asset 이름은 다음과 같습니다.
+`v0.2.2-rc.4` runtime source asset 이름은 다음과 같습니다.
 
-> `v0.2.2-rc.3`은 prerelease입니다. GitHub Actions 장애 중에는 초기 asset을 수동 게시할 수 있으므로 `SHA256SUMS`, exact-tag manifest, annotated tag를 검증하십시오. Release workflow가 복구되어 deterministic asset을 reconcile한 뒤 GitHub provenance attestation을 사용할 수 있습니다.
+> `v0.2.2-rc.4`은 prerelease입니다. GitHub Actions 장애 중에는 초기 asset을 수동 게시할 수 있으므로 `SHA256SUMS`, exact-tag manifest, annotated tag를 검증하십시오. Release workflow가 복구되어 deterministic asset을 reconcile한 뒤 GitHub provenance attestation을 사용할 수 있습니다.
 
 ```text
-ica-litellm-key-router-v0.2.2-rc.3.zip
-ica-litellm-key-router-v0.2.2-rc.3.zip.sha256
+ica-litellm-key-router-v0.2.2-rc.4.zip
+ica-litellm-key-router-v0.2.2-rc.4.zip.sha256
 ```
 
 ZIP sidecar는 소문자 SHA-256 digest, 공백 두 개, 정확한 ZIP filename, 마지막 newline으로 이루어진 한 줄이어야 합니다. Release에는 standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, `SHA256SUMS`도 포함됩니다. `SHA256SUMS`는 ZIP, ZIP sidecar, installer 두 개, manifest를 모두 검증합니다.
@@ -161,7 +164,7 @@ ZIP sidecar는 소문자 SHA-256 digest, 공백 두 개, 정확한 ZIP filename,
 ZIP과 sidecar를 받은 뒤 Linux에서 확인하는 예:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.2.2-rc.3.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.2.2-rc.4.zip.sha256
 ```
 
 `SHA256SUMS`에 적힌 release 파일을 모두 받은 뒤 installer 두 개를 포함한 전체 set을 확인하십시오.
@@ -173,7 +176,7 @@ sha256sum --check --strict SHA256SUMS
 Windows에서 exact ZIP sidecar를 확인하는 예:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.2.2-rc.3.zip'
+$asset = 'ica-litellm-key-router-v0.2.2-rc.4.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -197,7 +200,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 같은 channel에서 받은 checksum은 파일 손상이나 byte 불일치를 찾지만 publisher identity를 독립적으로 인증하지는 않습니다. 실행하기 전에 정확한 tag/commit과 신뢰하는 프로젝트 identity의 signature 또는 artifact attestation도 확인하십시오. GitHub artifact attestation이 배포된 경우의 예:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.2.2-rc.3.zip \
+gh attestation verify ica-litellm-key-router-v0.2.2-rc.4.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -216,14 +219,14 @@ python scripts/build-release.py --output-dir dist
 검증하고 압축 해제한 release에서 실행합니다.
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.2.2-rc.3
+cd /path/to/ica-litellm-key-router-v0.2.2-rc.4
 bash ./install-linux.sh
 ```
 
-별도로 검증한 standalone installer도 사용할 수 있습니다. 옆에 완전한 source tree가 없으면 `ICA_ROUTER_REF`의 정확한 asset을 받습니다. 기본값은 `v0.2.2-rc.3`입니다.
+별도로 검증한 standalone installer도 사용할 수 있습니다. 옆에 완전한 source tree가 없으면 `ICA_ROUTER_REF`의 정확한 asset을 받습니다. 기본값은 `v0.2.2-rc.4`입니다.
 
 ```bash
-ICA_ROUTER_REF=v0.2.2-rc.3 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.2.2-rc.4 bash ./install-linux.sh
 ```
 
 최초 실행에서는 각 catalog pool의 key를 한 개씩 안전하게 입력받습니다. 입력 내용은 화면에 표시되지 않습니다. 해당 pool의 마지막 key 다음 prompt에서 아무것도 입력하지 않고 Enter를 누르면 입력이 끝납니다. 각 pool에는 최소 한 개의 key가 필요합니다. 이후 모든 deployment를 생성하고 LiteLLM을 시작합니다.
@@ -315,7 +318,7 @@ Crash 후 `<install-root>/.install.lock` directory가 남으면 Linux 설치가 
 검증하고 압축 해제한 release에서 실행합니다.
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.2-rc.3'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.2-rc.4'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -359,7 +362,7 @@ Override 예:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.2-rc.3' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.2-rc.4' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```
@@ -684,7 +687,7 @@ Remove-Item -LiteralPath $root -Recurse -Force
 ```bash
 uv lock --check
 python -m unittest discover -s tests -v
-python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
 bash -n install-linux.sh
 out="$(mktemp -d)"
 python scripts/build-release.py --development --output-dir "$out"

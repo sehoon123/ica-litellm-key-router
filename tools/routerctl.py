@@ -37,6 +37,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4000
 DEFAULT_MAX_FALLBACKS = 2
 DEFAULT_COOLDOWN_SECONDS = 60
+UPSTREAM_NO_LOG_BODY = {"no-log": True}
+NO_LOG_CALLBACK = "tools.litellm_no_log.no_log_callback"
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_KEYS_PER_POOL = 256
 DEPRECATED_POOL_IDS = {"ibm-ica-nextgen"}
@@ -620,6 +622,10 @@ def generate_litellm_config(
                     "api_key": f"os.environ/{key_env_name(pool_id, index)}",
                     "weight": 1,
                     "max_retries": 0,
+                    # LiteLLM merges this at the provider boundary. The custom
+                    # callback reapplies it after routing so clients cannot
+                    # override the local-router-to-ICA policy.
+                    "extra_body": copy.deepcopy(UPSTREAM_NO_LOG_BODY),
                 }
                 model_info = {"id": deployment_id}
                 if provider["api"] == "azure-openai-responses":
@@ -669,6 +675,7 @@ def generate_litellm_config(
         "litellm_settings": {
             "set_verbose": False,
             "drop_params": False,
+            "callbacks": [NO_LOG_CALLBACK],
         },
         "general_settings": {
             "master_key": f"os.environ/{MASTER_ENV}",
@@ -2147,6 +2154,10 @@ def wait_for_authenticated_models(
 def serve_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str], dict[str, Any]]:
     catalog, secrets_doc, runtime = load_state(args.state_dir, args.catalog)
     config_path = args.state_dir / "config.yaml"
+    app_root = args.catalog.resolve().parent
+    callback_path = app_root / "tools" / "litellm_no_log.py"
+    if not callback_path.is_file() or callback_path.is_symlink():
+        raise ConfigError(f"release-bundled LiteLLM callback is missing or unsafe: {callback_path}")
     private_home = args.state_dir / "process-home"
     private_cache = args.state_dir / "process-cache"
     private_tmp = args.state_dir / "process-tmp"
@@ -2187,6 +2198,9 @@ def serve_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str], 
         "SCARF_NO_ANALYTICS": "true",
         "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
+        # Load only the release-bundled LiteLLM callback from the exact app
+        # tree; no ambient PYTHONPATH is inherited.
+        "PYTHONPATH": str(app_root),
         "NO_PROXY": "*",
         "no_proxy": "*",
     })

@@ -17,6 +17,7 @@ The router does not issue credentials. Use only credentials and IBM services tha
 - Selects a healthy deployment randomly with `simple-shuffle`; this is not round-robin.
 - Cools down a deployment immediately after configured failure classes and retries eligible pre-output failures.
 - Sets provider SDK retries to zero and disables weighted failover.
+- Forces top-level `"no-log": true` into every JSON body sent from the local LiteLLM worker to ICA.
 - Keeps raw upstream keys out of generated `config.yaml`.
 - Uses a command-backed client credential, so generated Pi, Claude Code, and Codex configuration does not persist another copy of the local master key.
 - Configures Pi/prime-agent, Claude Code, and a separate Codex profile without deleting unrelated settings or replacing Codex subscription defaults.
@@ -42,6 +43,8 @@ IBM ICA Services Essentials HTTPS gateway
 `tools/routerctl.py` is the standard-library-only control plane. LiteLLM is the data plane. The installer creates a versioned release, generates private state, runs an offline `doctor`, and starts the router.
 
 “Local-only” applies to the client-facing listener. Prompts, responses, tool data, and model metadata still leave the machine over HTTPS for the IBM endpoint selected by `catalog.json`. This project has no hosted relay or database. The launcher creates a minimal LiteLLM child environment with a fixed path, key variables, forced production/error logging, telemetry controls, and private `process-home`, `process-cache`, and `process-tmp` directories under state. Ambient proxy/custom-CA variables and other environment-based provider features are not inherited, so direct IBM HTTPS access with the normal system trust configuration is required.
+
+Every generated deployment defaults `extra_body` to `{"no-log": true}`. A release-bundled callback reapplies that value after LiteLLM selects and merges a deployment, preventing an incoming local request from overriding it, and adapts LiteLLM `1.98.0`'s native Anthropic Messages allowlist so ICA receives the same top-level field as it does for OpenAI Responses and Gemini. This controls the local-LiteLLM-to-ICA request body only; whether ICA and later upstreams honor the field is outside this project's trust boundary.
 
 The loopback listener uses HTTP because it does not leave the host. Bootstrap and runtime validation reject any host other than `127.0.0.1`; the port is configurable. This project does not provide TLS, remote access controls, or multi-user isolation.
 
@@ -147,13 +150,13 @@ With Codex 0.134.0 or later, use `codex --profile ica-router` for the generated 
 
 ## Verify a release before installation
 
-For `v0.2.2-rc.3`, the runtime source asset is:
+For `v0.2.2-rc.4`, the runtime source asset is:
 
-> `v0.2.2-rc.3` is a prerelease. Its initial assets may be published manually during a GitHub Actions outage; verify `SHA256SUMS`, the exact-tag manifest, and the annotated tag. GitHub provenance attestations become available after the release workflow recovers and reconciles the deterministic assets.
+> `v0.2.2-rc.4` is a prerelease. Its initial assets may be published manually during a GitHub Actions outage; verify `SHA256SUMS`, the exact-tag manifest, and the annotated tag. GitHub provenance attestations become available after the release workflow recovers and reconciles the deterministic assets.
 
 ```text
-ica-litellm-key-router-v0.2.2-rc.3.zip
-ica-litellm-key-router-v0.2.2-rc.3.zip.sha256
+ica-litellm-key-router-v0.2.2-rc.4.zip
+ica-litellm-key-router-v0.2.2-rc.4.zip.sha256
 ```
 
 The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces, the exact ZIP filename, and a final newline. A release also contains standalone `install-linux.sh`, `install-windows.ps1`, `release-manifest.json`, and `SHA256SUMS`; the latter covers the ZIP, ZIP sidecar, both installers, and manifest.
@@ -161,7 +164,7 @@ The ZIP sidecar is exactly one line with a lowercase SHA-256 digest, two spaces,
 Linux example after downloading the ZIP and its sidecar:
 
 ```bash
-sha256sum --check --strict ica-litellm-key-router-v0.2.2-rc.3.zip.sha256
+sha256sum --check --strict ica-litellm-key-router-v0.2.2-rc.4.zip.sha256
 ```
 
 After downloading all release files named by `SHA256SUMS`, verify the complete set, including both standalone installers:
@@ -173,7 +176,7 @@ sha256sum --check --strict SHA256SUMS
 Windows example for the exact ZIP sidecar:
 
 ```powershell
-$asset = 'ica-litellm-key-router-v0.2.2-rc.3.zip'
+$asset = 'ica-litellm-key-router-v0.2.2-rc.4.zip'
 $line = [IO.File]::ReadAllText("$asset.sha256", [Text.Encoding]::ASCII)
 if ($line -notmatch '\A([0-9a-f]{64})  ([^\r\n]+)\r?\n\z' -or $Matches[2] -ne $asset) {
   throw 'Invalid checksum sidecar'
@@ -197,7 +200,7 @@ if ($actual -ne $expected) { throw 'Checksum mismatch' }
 A same-channel checksum detects corruption or inconsistent bytes; it does **not** independently authenticate the publisher. Before execution, also verify the exact tag/commit and a signature or artifact attestation from a trusted project identity. For a published GitHub artifact attestation, for example:
 
 ```bash
-gh attestation verify ica-litellm-key-router-v0.2.2-rc.3.zip \
+gh attestation verify ica-litellm-key-router-v0.2.2-rc.4.zip \
   --repo sehoon123/ica-litellm-key-router
 ```
 
@@ -216,14 +219,14 @@ Publishing is a release gate: run CI, reproduce the ZIP, verify the sidecar, tes
 From an extracted, verified release:
 
 ```bash
-cd /path/to/ica-litellm-key-router-v0.2.2-rc.3
+cd /path/to/ica-litellm-key-router-v0.2.2-rc.4
 bash ./install-linux.sh
 ```
 
-Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.2.2-rc.3`):
+Or run a separately verified standalone installer. With no complete source tree beside it, it downloads the exact asset for `ICA_ROUTER_REF` (default `v0.2.2-rc.4`):
 
 ```bash
-ICA_ROUTER_REF=v0.2.2-rc.3 bash ./install-linux.sh
+ICA_ROUTER_REF=v0.2.2-rc.4 bash ./install-linux.sh
 ```
 
 On the first run, the installer asks for one key at a time for each catalog pool. Input is hidden. Press Enter on an empty key prompt after the last key in that pool. At least one key is required in each pool. It then generates all deployments and starts LiteLLM.
@@ -315,7 +318,7 @@ A leftover `<install-root>/.install.lock` directory after a crash blocks Linux i
 From an extracted, verified release:
 
 ```powershell
-Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.2-rc.3'
+Set-Location 'C:\path\to\ica-litellm-key-router-v0.2.2-rc.4'
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
 
@@ -359,7 +362,7 @@ Overrides:
 ```powershell
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -InstallRoot 'D:\Private\ICA Router' `
-  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.2-rc.3' `
+  -SourceDirectory 'D:\Verified\ica-litellm-key-router-v0.2.2-rc.4' `
   -KeyRotatorPath 'D:\Private\key-rotator.json' `
   -NonInteractive
 ```
@@ -684,7 +687,7 @@ Checks do not need real provider keys:
 ```bash
 uv lock --check
 python -m unittest discover -s tests -v
-python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
 bash -n install-linux.sh
 out="$(mktemp -d)"
 python scripts/build-release.py --development --output-dir "$out"

@@ -1,6 +1,6 @@
 [project]
 name = "ica-litellm-key-router-runtime"
-version = "0.2.2rc3"
+version = "0.2.2rc4"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "litellm[proxy]==1.98.0",

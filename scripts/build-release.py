@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
+import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +35,8 @@ REQUIRED = {
     ".gitignore", "LICENSE", "README.md", "README.ko.md", "SECURITY.md", "VERSION",
     "catalog.json", "examples/secrets.example.json", "install-linux.sh",
     "install-windows.ps1", "pyproject.toml", "scripts/build-release.py",
-    "tests/test_routerctl.py", "tools/routerctl.py", "uv.lock",
+    "tests/test_litellm_no_log.py", "tests/test_routerctl.py",
+    "tools/litellm_no_log.py", "tools/routerctl.py", "uv.lock",
 }
 FIXED_TIME = (2020, 1, 1, 0, 0, 0)
 MAX_MEMBERS = 2000
@@ -126,6 +128,14 @@ def main() -> int:
     )
     args = parser.parse_args()
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    runtime_version = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+    expected_runtime_version = version.replace("-rc.", "rc")
+    if runtime_version != expected_runtime_version:
+        raise SystemExit(
+            f"pyproject version {runtime_version!r} does not match VERSION {version!r}"
+        )
     tag = f"v{version}"
     top = f"ica-litellm-key-router-{tag}"
     files, commit = tracked_release_files(version, args.development)

@@ -56,7 +56,7 @@ jobs:
           test "${GITHUB_REF_NAME}" = "v$(cat VERSION)"
           uv lock --check
           python -m unittest discover -s tests -v
-          python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+          python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
           bash -n install-linux.sh
 
       - name: Build and verify provenance-checked assets

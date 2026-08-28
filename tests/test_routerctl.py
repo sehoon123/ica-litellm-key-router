@@ -69,6 +69,15 @@ class RouterConfigTests(unittest.TestCase):
         self.assertEqual(0, config["router_settings"]["retry_policy"]["BadRequestErrorRetries"])
         self.assertEqual(2, config["router_settings"]["retry_policy"]["RateLimitErrorRetries"])
         self.assertEqual(0, config["router_settings"]["allowed_fails"])
+        self.assertEqual(
+            [routerctl.NO_LOG_CALLBACK], config["litellm_settings"]["callbacks"]
+        )
+        self.assertTrue(
+            all(
+                deployment["litellm_params"]["extra_body"] == {"no-log": True}
+                for deployment in config["model_list"]
+            )
+        )
         openai_deployment = next(
             item for item in config["model_list"] if item["model_name"].startswith("ica-se-openai--")
         )
@@ -671,6 +680,7 @@ class RouterConfigTests(unittest.TestCase):
             self.assertEqual("PRODUCTION", environment["LITELLM_MODE"])
             self.assertNotIn("AMBIENT_TEST_SECRET", environment)
             self.assertEqual("true", environment["OTEL_SDK_DISABLED"])
+            self.assertEqual(str(ROOT.resolve()), environment["PYTHONPATH"])
 
     def test_interactive_secret_entry_requires_tty(self) -> None:
         with mock.patch.object(routerctl.sys.stdin, "isatty", return_value=False):

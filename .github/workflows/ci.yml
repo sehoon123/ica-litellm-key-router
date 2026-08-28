@@ -45,7 +45,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Compile Python sources
-        run: python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+        run: python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
 
       - name: Check Bash syntax
         run: bash -n install-linux.sh
@@ -415,6 +415,13 @@ jobs:
           assert len(aliases) == 12
           assert len(generated["providers"]) == 3
           assert len(config["model_list"]) == 24
+          assert config["litellm_settings"]["callbacks"] == [
+              "tools.litellm_no_log.no_log_callback"
+          ]
+          assert all(
+              deployment["litellm_params"]["extra_body"] == {"no-log": True}
+              for deployment in config["model_list"]
+          )
           assert subprocess.check_output(
               [str(root / "ica-router"), "client-token"], text=True
           ).strip() == secrets["masterKey"]
@@ -428,6 +435,7 @@ jobs:
           assert "keep-ci-dummy" in client["providers"]
           assert len(client["providers"]) == 4
           PY
+          (cd "$second_release/app" && "$python_bin" tests/test_litellm_no_log.py -v)
           [[ "$("$install_root/tools/uv-0.12.2/uv" --version)" == "uv 0.12.2"* ]]
 
           shopt -s nullglob
@@ -534,7 +542,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-project --python 3.12.13 python -m unittest discover -s tests -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run --no-project --python 3.12.13 python -m py_compile tools/routerctl.py tests/test_routerctl.py scripts/build-release.py
+          uv run --no-project --python 3.12.13 python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Parse PowerShell installer on Windows
