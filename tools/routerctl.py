@@ -11,6 +11,7 @@ import argparse
 import base64
 import copy
 from contextlib import contextmanager
+from functools import cache
 import getpass
 import hashlib
 import http.client
@@ -42,19 +43,10 @@ NO_LOG_CALLBACK = "tools.litellm_no_log.no_log_callback"
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_KEYS_PER_POOL = 256
 DEPRECATED_POOL_IDS = {"ibm-ica-nextgen"}
-_WINDOWS_SID_CACHE: str | None = None
-_WINDOWS_SID_BYTES_CACHE: bytes | None = None
-_WINDOWS_API_CACHE: dict[str, Any] | None = None
 DEPRECATED_CLIENT_PROVIDER_IDS = {
     "ibm-ica-router",
     "ibm-ica-claude-router",
     "ibm-ica-gemini-router",
-}
-ALLOWED_APIS = {
-    "azure-openai-responses",
-    "openai-responses",
-    "anthropic-messages",
-    "google-generative-ai",
 }
 PROVIDER_PREFIX = {
     "azure-openai-responses": "openai/",
@@ -62,18 +54,13 @@ PROVIDER_PREFIX = {
     "anthropic-messages": "anthropic/",
     "google-generative-ai": "gemini/",
 }
-CLIENT_API = {
-    "azure-openai-responses": "openai-responses",
-    "openai-responses": "openai-responses",
-    "anthropic-messages": "anthropic-messages",
-    "google-generative-ai": "google-generative-ai",
-}
+ALLOWED_APIS = frozenset(PROVIDER_PREFIX)
 PLACEHOLDER_RE = re.compile(r"(?:REPLACE[_-]?ME|YOUR[_-]?KEY|<[^>]+>)", re.I)
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SYSTEMD_UNIT_NAME = "ica-litellm-key-router.service"
 SYSTEMD_UNIT_MARKER = "# Managed by ICA LiteLLM Key Router"
 DEFAULT_CLAUDE_MODEL = "ica-se-claude--claude-opus-5"
-DEFAULT_CLAUDE_OPUS_MODEL = "ica-se-claude--claude-opus-5"
+DEFAULT_CLAUDE_OPUS_MODEL = DEFAULT_CLAUDE_MODEL
 DEFAULT_CLAUDE_SONNET_MODEL = "ica-se-claude--claude-sonnet-5"
 DEFAULT_CLAUDE_HAIKU_MODEL = "ica-se-claude--claude-haiku-4-5"
 DEFAULT_CODEX_MODEL = "ica-se-openai--gpt-5.6-sol"
@@ -711,10 +698,10 @@ def router_wrapper_invocation(state_dir: Path) -> tuple[str, list[str]]:
     return str(root / "ica-router"), []
 
 
-def shell_command(arguments: list[str]) -> str:
+def _posix_shell_command(arguments: list[str]) -> str:
     if any("\x00" in value or "\n" in value or "\r" in value for value in arguments):
         raise ConfigError("client helper command contains a control character")
-    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
+    return shlex.join(arguments)
 
 
 def windows_client_token_command(
@@ -754,7 +741,7 @@ def client_token_command(state_dir: Path, bearer: bool = False) -> str:
     arguments = [executable, *prefix_args, "client-token"]
     if bearer:
         arguments.append("--bearer")
-    return shell_command(arguments)
+    return _posix_shell_command(arguments)
 
 
 def generate_client_providers(
@@ -768,7 +755,11 @@ def generate_client_providers(
         local: dict[str, Any] = {
             "name": f"{provider.get('name', provider_id)} via local LiteLLM",
             "baseUrl": local_base_url(provider["api"], host, port),
-            "api": CLIENT_API[provider["api"]],
+            "api": (
+                "openai-responses"
+                if provider["api"] == "azure-openai-responses"
+                else provider["api"]
+            ),
             "apiKey": f"!{token_command}",
             "models": [],
         }
@@ -824,10 +815,6 @@ def write_rendered_client_models(path: Path, rendered: str) -> tuple[bool, Path 
         restrict_windows_file(path)
     validate_private_file(path, "client models.json")
     return True, backup
-
-
-def merge_client_models(path: Path, generated: dict[str, Any]) -> tuple[bool, Path | None]:
-    return write_rendered_client_models(path, render_merged_client_models(path, generated))
 
 
 def canonical_client_path(path: Path) -> Path:
@@ -946,13 +933,11 @@ def load_state(state_dir: Path, catalog_path: Path) -> tuple[dict[str, Any], dic
     return catalog, secrets_doc, runtime
 
 
+@cache
 def _windows_api() -> dict[str, Any]:
     """Load the small Win32 surface used for private ACL and process checks."""
-    global _WINDOWS_API_CACHE
     if os.name != "nt":
         raise ConfigError("Windows security API requested on a non-Windows host")
-    if _WINDOWS_API_CACHE is not None:
-        return _WINDOWS_API_CACHE
 
     import ctypes
     from ctypes import wintypes
@@ -1099,7 +1084,7 @@ def _windows_api() -> dict[str, Any]:
     ]
     advapi32.GetAce.restype = wintypes.BOOL
 
-    _WINDOWS_API_CACHE = {
+    return {
         "ctypes": ctypes,
         "wintypes": wintypes,
         "kernel32": kernel32,
@@ -1111,7 +1096,6 @@ def _windows_api() -> dict[str, Any]:
         "ACL_SIZE_INFORMATION": ACL_SIZE_INFORMATION,
         "FILETIME": FILETIME,
     }
-    return _WINDOWS_API_CACHE
 
 
 def _windows_api_error(label: str, code: int | None = None) -> ConfigError:
@@ -1122,10 +1106,8 @@ def _windows_api_error(label: str, code: int | None = None) -> ConfigError:
     return ConfigError(f"{label} (Windows error {value}: {detail})")
 
 
+@cache
 def _current_windows_sid_bytes() -> bytes:
-    global _WINDOWS_SID_BYTES_CACHE
-    if _WINDOWS_SID_BYTES_CACHE is not None:
-        return _WINDOWS_SID_BYTES_CACHE
     api = _windows_api()
     ctypes = api["ctypes"]
     wintypes = api["wintypes"]
@@ -1151,30 +1133,9 @@ def _current_windows_sid_bytes() -> bytes:
         sid_length = int(advapi32.GetLengthSid(sid_pointer))
         if sid_length < 8:
             raise ConfigError("current Windows token contains a truncated SID")
-        _WINDOWS_SID_BYTES_CACHE = ctypes.string_at(sid_pointer, sid_length)
-        return _WINDOWS_SID_BYTES_CACHE
+        return ctypes.string_at(sid_pointer, sid_length)
     finally:
         kernel32.CloseHandle(token)
-
-
-def current_windows_sid() -> str:
-    global _WINDOWS_SID_CACHE
-    if _WINDOWS_SID_CACHE is not None:
-        return _WINDOWS_SID_CACHE
-    value = _current_windows_sid_bytes()
-    subauthority_count = value[1]
-    expected_length = 8 + subauthority_count * 4
-    if value[0] != 1 or len(value) != expected_length:
-        raise ConfigError("current Windows token contains an unsupported SID")
-    authority = int.from_bytes(value[2:8], "big")
-    subauthorities = [
-        int.from_bytes(value[offset : offset + 4], "little")
-        for offset in range(8, expected_length, 4)
-    ]
-    _WINDOWS_SID_CACHE = "S-1-" + str(authority) + "".join(
-        f"-{part}" for part in subauthorities
-    )
-    return _WINDOWS_SID_CACHE
 
 
 def _windows_acl_check(path: Path, *, directory: bool, set_acl: bool) -> None:
@@ -1286,22 +1247,18 @@ def restrict_windows_directory(path: Path) -> None:
     _windows_acl_check(path, directory=True, set_acl=True)
 
 
-def _run_windows_acl_check(path: Path, set_acl: bool) -> None:
-    _windows_acl_check(path, directory=False, set_acl=set_acl)
-
-
 def restrict_windows_file(path: Path) -> None:
     if os.name != "nt" or not path.exists():
         return
     _reject_unsafe_existing_file(path, "private Windows file")
-    _run_windows_acl_check(path, set_acl=True)
+    _windows_acl_check(path, directory=False, set_acl=True)
 
 
 def verify_windows_private_file(path: Path) -> None:
     if os.name != "nt":
         return
     _reject_unsafe_existing_file(path, "private Windows file")
-    _run_windows_acl_check(path, set_acl=False)
+    _windows_acl_check(path, directory=False, set_acl=False)
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
@@ -1440,7 +1397,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         if path in seen:
             continue
         seen.add(path)
-        changed, backup = merge_client_models(path, generated)
+        changed, backup = write_rendered_client_models(
+            path, render_merged_client_models(path, generated)
+        )
         restrict_windows_file(path)
         if changed:
             print(f"Updated client model config: {path}")
@@ -1487,7 +1446,9 @@ def cmd_configure_clients(args: argparse.Namespace) -> int:
     if not paths:
         raise ConfigError("no client models.json files found")
     for path in dict.fromkeys(paths):
-        changed, backup = merge_client_models(path, generated)
+        changed, backup = write_rendered_client_models(
+            path, render_merged_client_models(path, generated)
+        )
         restrict_windows_file(path)
         print(f"{'Updated' if changed else 'Already current'}: {path}")
         if backup:
@@ -1549,16 +1510,6 @@ def render_claude_code_settings(
     updated["env"] = env
     updated["apiKeyHelper"] = token_helper
     return json.dumps(updated, ensure_ascii=False, indent=2) + "\n"
-
-
-def merge_claude_code_settings(
-    path: Path,
-    token_helper: str,
-    base_url: str,
-    model: str,
-) -> tuple[bool, Path | None]:
-    rendered = render_claude_code_settings(path, token_helper, base_url, model)
-    return write_private_client_file(path, rendered, "Claude Code settings")
 
 
 def toml_string(value: str) -> str:
@@ -1856,14 +1807,6 @@ def process_alive(pid: int) -> bool:
     )
     return result.returncode == 0 and bool(result.stdout.strip()) and not result.stdout.lstrip().startswith("Z")
 
-def read_pid(path: Path) -> int | None:
-    try:
-        value = int(path.read_text(encoding="ascii").strip())
-    except (FileNotFoundError, ValueError, UnicodeError):
-        return None
-    return value if value > 0 else None
-
-
 @contextmanager
 def command_lock(state_dir: Path) -> Iterator[None]:
     """Serialize lifecycle commands without trusting a PID file alone."""
@@ -2078,17 +2021,6 @@ def terminate_process_group(pid: int, expected_start_token: str, timeout: float 
         time.sleep(0.05)
     if process_alive(pid) and process_start_token(pid) == expected_start_token:
         raise ConfigError(f"router PID {pid} survived forced termination")
-
-
-def wait_for_port(host: str, port: int, timeout: float) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=min(1.0, max(timeout, 0.05))):
-                return True
-        except OSError:
-            time.sleep(0.25)
-    return False
 
 
 def _local_http_get(

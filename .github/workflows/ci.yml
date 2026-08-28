@@ -346,6 +346,9 @@ jobs:
           mkdir -m 700 -- "$home_dir" "$home_dir/.pi" "$home_dir/.pi/agent"
           export HOME="$home_dir"
           client_path="$HOME/.pi/agent/models.json"
+          command_path="$HOME/.local/bin/ica-router"
+          mkdir -p -- "$(dirname -- "$command_path")"
+          printf '%s\n' 'unrelated command' > "$command_path"
           printf '%s\n' '{"providers":{"keep-ci-dummy":{"baseUrl":"http://127.0.0.1:9"}}}' > "$client_path"
           chmod 600 "$client_path"
 
@@ -377,6 +380,8 @@ jobs:
           bash ./install-linux.sh --pi-models
           first_release="$(readlink -f -- "$install_root/current")"
           [[ -d "$first_release" ]]
+          [[ -f "$command_path" && ! -L "$command_path" ]]
+          grep -Fxq 'unrelated command' "$command_path"
 
           bash ./install-linux.sh
           second_release="$(readlink -f -- "$install_root/current")"

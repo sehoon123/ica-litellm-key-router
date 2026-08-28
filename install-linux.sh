@@ -347,9 +347,8 @@ MANAGED_PYTHON="$(run_uv python find "$PYTHON_VERSION")"
 [[ -x "$MANAGED_PYTHON" ]] || die "uv-managed Python 3.12 was not found"
 
 safe_extract_zip() {
-  local archive="$1" destination="$2" expected_top="$3" extractor
-  extractor="$INSTALL_ROOT/.safe-extract-$$.py"
-  cat >"$extractor" <<'PY'
+  local archive="$1" destination="$2" expected_top="$3"
+  "$MANAGED_PYTHON" -I - "$archive" "$destination" "$expected_top" <<'PY'
 from pathlib import Path, PurePosixPath
 import shutil, stat, sys, zipfile
 archive, root, expected = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
@@ -386,9 +385,6 @@ with zipfile.ZipFile(archive) as zf:
             shutil.copyfileobj(source, output)
         target.chmod(0o600)
 PY
-  chmod 700 "$extractor"
-  "$MANAGED_PYTHON" -I "$extractor" "$archive" "$destination" "$expected_top"
-  rm -f -- "$extractor"
 }
 
 resolve_source() {

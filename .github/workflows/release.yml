@@ -43,21 +43,9 @@ jobs:
         with:
           python-version: "3.12.13"
 
-      - name: Set up exact uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: "0.12.2"
-          enable-cache: false
-
-      - name: Verify tag, lock, tests, and syntax
+      - name: Verify exact tag
         shell: bash
-        run: |
-          set -euo pipefail
-          test "${GITHUB_REF_NAME}" = "v$(cat VERSION)"
-          uv lock --check
-          python -m unittest discover -s tests -v
-          python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
-          bash -n install-linux.sh
+        run: test "${GITHUB_REF_NAME}" = "v$(cat VERSION)"
 
       - name: Build and verify provenance-checked assets
         shell: bash

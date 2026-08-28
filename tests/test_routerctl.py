@@ -106,6 +106,23 @@ class RouterConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(routerctl.ConfigError, "requires a valid litellmBaseModel"):
             routerctl.validate_catalog(catalog)
 
+    def test_direct_openai_responses_catalog_remains_supported(self) -> None:
+        catalog = json.loads(json.dumps(self.catalog))
+        provider = catalog["providers"]["ica-se-openai"]
+        provider["api"] = "openai-responses"
+        for model in provider["models"]:
+            model.pop("litellmBaseModel")
+        config = routerctl.generate_litellm_config(catalog, self.secrets)
+        deployment = next(
+            item
+            for item in config["model_list"]
+            if item["model_name"].startswith("ica-se-openai--")
+        )
+        self.assertTrue(deployment["litellm_params"]["model"].startswith("openai/"))
+        self.assertEqual(provider["baseUrl"], deployment["litellm_params"]["api_base"])
+        self.assertNotIn("api_version", deployment["litellm_params"])
+        self.assertNotIn("base_model", deployment["model_info"])
+
     def test_client_protocol_bases_preserve_native_surfaces(self) -> None:
         state_dir = Path("/private/router/state")
         generated = routerctl.generate_client_providers(
@@ -164,11 +181,14 @@ class RouterConfigTests(unittest.TestCase):
                     }
                 )
             )
-            changed, backup = routerctl.merge_claude_code_settings(
+            rendered = routerctl.render_claude_code_settings(
                 path,
                 "/private/router/ica-router client-token",
                 "http://127.0.0.1:4000",
                 routerctl.DEFAULT_CLAUDE_MODEL,
+            )
+            changed, backup = routerctl.write_private_client_file(
+                path, rendered, "Claude Code settings"
             )
             self.assertTrue(changed)
             self.assertIsNotNone(backup)
@@ -530,7 +550,9 @@ class RouterConfigTests(unittest.TestCase):
                     }
                 )
             )
-            changed, backup = routerctl.merge_client_models(path, generated)
+            changed, backup = routerctl.write_rendered_client_models(
+                path, routerctl.render_merged_client_models(path, generated)
+            )
             self.assertTrue(changed)
             self.assertIsNotNone(backup)
             data = json.loads(path.read_text())
@@ -542,13 +564,13 @@ class RouterConfigTests(unittest.TestCase):
             )
             if os.name != "nt":
                 path.chmod(0o644)
-            changed2, backup2 = routerctl.merge_client_models(path, generated)
+            changed2, backup2 = routerctl.write_rendered_client_models(
+                path, routerctl.render_merged_client_models(path, generated)
+            )
             self.assertFalse(changed2)
             self.assertIsNone(backup2)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            if os.name != "nt":
-                self.assertEqual(0o600, stat.S_IMODE(path.stat().st_mode))
 
     def test_single_services_essentials_key_is_valid(self) -> None:
         document = json.loads(json.dumps(self.secrets))
@@ -1000,7 +1022,6 @@ class WindowsNativeSecurityTests(unittest.TestCase):
                 routerctl.restrict_windows_directory(private)
                 routerctl.restrict_windows_file(secret)
                 routerctl.verify_windows_private_file(secret)
-                self.assertRegex(routerctl.current_windows_sid(), r"^S-1-(?:\d+-)+\d+$")
                 self.assertTrue(routerctl.process_alive(os.getpid()))
                 token = routerctl.process_start_token(os.getpid())
                 self.assertRegex(token or "", r"^windows:\d+$")

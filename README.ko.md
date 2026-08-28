@@ -626,9 +626,7 @@ Merge는 다른 provider ID를 보존하고 현재 라우터 소유 ID 3개를 �
 4. 새 platform installer를 실행합니다.
 5. `doctor`와 `status`를 확인하고 Pi/prime-agent를 다시 시작합니다.
 
-Installer는 update를 직렬화하고 versioned release를 stage합니다. 생성 state와 명시적으로 요청한 client 파일을 snapshot하고, 이전 managed process를 중지하고, `current`를 atomic 전환하고, bootstrap/check/start를 수행합니다. 유효한 기존 port, `maxFallbacks`, cooldown runtime 설정은 명시적 bootstrap flag로 바꾸지 않는 한 보존됩니다. Stop/switch 후 처리된 오류가 발생하면 이전 pointer, state, 요청한 client 파일을 복원하고 이전 release 재시작을 시도합니다. 이전 versioned release는 보존됩니다.
-
-Rollback은 **best effort**이며 crash-proof transaction이 아닙니다. 전원 손실, 강제 종료, storage/ACL 실패, custom client path는 부분 작업이나 수동 복구를 남길 수 있습니다. 기존의 다른 client secret은 rollback snapshot 및 timestamp backup에 들어갈 수 있지만 command-backed router 항목 자체에는 helper command만 들어갑니다. 검증이 끝날 때까지 별도의 보호된 backup을 유지하고, 오래된 release와 backup을 의도적으로 정리하십시오.
+Installer는 versioned release를 stage하고 유효한 runtime 설정을 보존하며, 처리된 오류가 발생하면 이전 release와 요청한 client 파일의 복원을 시도합니다. Rollback은 best effort이고 이전 release가 보존되며 backup에는 다른 client secret도 포함될 수 있습니다. 실패 한계는 [SECURITY.md](SECURITY.md#update-transaction-and-rollback-limits)를 참조하십시오.
 
 ## 삭제
 
@@ -665,20 +663,11 @@ Remove-Item -LiteralPath $root -Recurse -Force
 
 배포 전에 [SECURITY.md](SECURITY.md)를 읽으십시오. 주요 제한:
 
-- TLS 또는 remote-service hardening이 없는 local single-user 용도;
-- LiteLLM worker 한 개이며 distributed key service가 아님;
-- 무작위 `simple-shuffle`이며 round-robin 또는 equal-share scheduling이 아님;
-- weighted failover 비활성화, 설정된 출력 전 재시도만 수행;
-- 모호한 재시도로 작업 중복이나 이중 과금 가능;
-- mid-stream failover 없음;
-- `doctor`는 IBM credential/quota를 검증하지 않음;
-- secret은 vault가 아니라 filesystem permission/ACL로 보호되는 plaintext임;
-- command-backed helper는 persistent 사본을 줄이지만 runtime에는 각 client process에 local master key를 전달함;
-- same-user, administrator, debugger 또는 침해된 process 접근은 방어하지 못함;
-- 최소 runtime environment와 direct HTTPS만 사용하며 ambient proxy, custom CA, environment 기반 provider 기능을 상속하지 않음;
-- checksum 검증은 독립적인 publisher 인증이 아님;
-- best-effort update rollback은 power-loss atomic이 아님;
-- model availability, behavior, quota, upstream retention은 IBM 및 model provider가 제어함.
+- filesystem permission/ACL로 plaintext secret을 보호하는 local single-user 용도;
+- 무작위 `simple-shuffle`을 사용하는 worker 한 개, 모호한 출력 전 재시도 및 mid-stream failover 없음;
+- ambient proxy, custom CA, environment 기반 provider 기능을 상속하지 않는 direct HTTPS 전용 runtime;
+- `doctor`는 IBM credential/quota를 검증하지 않으며 model 동작과 retention은 upstream이 제어함; 그리고
+- checksum은 publisher를 인증하지 않으며 update rollback은 power-loss atomic이 아님.
 
 ## 개발
 

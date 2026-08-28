@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import shutil
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import stat
 import subprocess
 import tomllib
@@ -96,17 +95,9 @@ def tracked_release_files(version: str, development: bool) -> tuple[list[Path], 
     return files, commit
 
 
-def add_directory(zf: zipfile.ZipFile, name: str) -> None:
-    info = zipfile.ZipInfo(name.rstrip("/") + "/", FIXED_TIME)
-    info.create_system = 3
-    info.external_attr = (stat.S_IFDIR | 0o755) << 16
-    info.compress_type = zipfile.ZIP_STORED
-    zf.writestr(info, b"")
-
-
 def add_file(zf: zipfile.ZipFile, path: Path, name: str) -> None:
     data = path.read_bytes()
-    executable = path.name in {"install-linux.sh", "build-release.py"} or data.startswith(b"#!")
+    executable = data.startswith(b"#!")
     info = zipfile.ZipInfo(name, FIXED_TIME)
     info.create_system = 3
     info.external_attr = (stat.S_IFREG | (0o755 if executable else 0o644)) << 16
@@ -148,15 +139,7 @@ def main() -> int:
         raise SystemExit(f"output directory must be empty: {output_dir}")
 
     archive = output_dir / f"{top}.zip"
-    directories = {top}
-    for path in files:
-        relative = PurePosixPath(path.relative_to(ROOT).as_posix())
-        for parent in relative.parents:
-            if str(parent) != ".":
-                directories.add(f"{top}/{parent.as_posix()}")
     with zipfile.ZipFile(archive, "w", allowZip64=False) as zf:
-        for directory in sorted(directories):
-            add_directory(zf, directory)
         for path in files:
             add_file(zf, path, f"{top}/{path.relative_to(ROOT).as_posix()}")
 

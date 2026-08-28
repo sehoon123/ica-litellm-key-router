@@ -626,9 +626,7 @@ Run `ica-router client-token` only to verify that the command succeeds; do not p
 4. Run the new platform installer.
 5. Confirm `doctor` and `status`, then restart Pi/prime-agent.
 
-An installer serializes updates, stages a versioned release, snapshots generated state and explicitly requested client files, stops the old managed process, atomically switches `current`, bootstraps, checks, and starts. Valid existing port, `maxFallbacks`, and cooldown runtime settings are preserved unless an explicit bootstrap flag changes them. On a handled failure after stop/switch, the installer attempts to restore the previous pointer, state, and requested client files and restart the old release. Old versioned releases are retained.
-
-Rollback is **best effort**, not a crash-proof transaction. Power loss, forced termination, storage failure, ACL failure, or custom client paths can leave partial work or require manual recovery. Unrelated pre-existing client secrets can exist in rollback snapshots and timestamped backups; command-backed router entries themselves contain only helper commands. Keep an independent protected backup until verification, and remove obsolete releases/backups deliberately.
+The installer stages a versioned release, preserves valid runtime settings, and attempts to restore the previous release and requested client files after a handled failure. Rollback is best effort, old releases are retained, and backups can contain unrelated client secrets. See [SECURITY.md](SECURITY.md#update-transaction-and-rollback-limits) for failure limits.
 
 ## Uninstall
 
@@ -665,20 +663,11 @@ Confirm the path, especially after `ICA_ROUTER_HOME` or `-InstallRoot`. Deletion
 
 Read [SECURITY.md](SECURITY.md). Main limits:
 
-- local, single-user use only; no TLS or remote-service hardening;
-- one LiteLLM worker, not a distributed key service;
-- random `simple-shuffle`, not round-robin or equal-share scheduling;
-- weighted failover disabled and at most the configured pre-output retries;
-- ambiguous retries can duplicate or bill work;
-- no mid-stream failover;
-- no IBM credential/quota validation in `doctor`;
-- plaintext secrets protected by filesystem permissions/ACLs, not a vault;
-- command-backed helpers reduce persistent copies but deliver the local master key to each client process at runtime;
-- same-user, administrator, debugger, or compromised-process access remains in scope;
-- a minimal runtime environment with direct HTTPS only; ambient proxies, custom CAs, and environment-based provider features are not inherited;
-- checksum verification is not independent publisher authentication;
-- best-effort update rollback is not power-loss atomic; and
-- model availability, behavior, quotas, and upstream retention remain controlled by IBM and model providers.
+- local, single-user operation with plaintext secrets protected by filesystem permissions/ACLs;
+- one worker using random `simple-shuffle`, with ambiguous pre-output retries and no mid-stream failover;
+- direct HTTPS only, without inherited proxies, custom CAs, or environment-based provider features;
+- no IBM credential/quota validation in `doctor`; model behavior and retention remain upstream-controlled; and
+- checksums do not authenticate the publisher, and update rollback is not power-loss atomic.
 
 ## Development
 

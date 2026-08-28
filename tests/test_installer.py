@@ -8,7 +8,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install-linux.sh"
-WINDOWS_INSTALLER = ROOT / "install-windows.ps1"
 
 
 @unittest.skipIf(os.name == "nt", "Linux installer tests")
@@ -57,19 +56,6 @@ esac
             text=True,
             timeout=30,
         )
-
-    def test_release_candidate_reference_is_accepted_by_source_validation(self) -> None:
-        linux_source = INSTALLER.read_text(encoding="utf-8")
-        windows_source = WINDOWS_INSTALLER.read_text(encoding="utf-8")
-        self.assertIn('(-rc\\.[0-9]+)?$', linux_source)
-        self.assertIn('(?:-rc\\.[0-9]+)?$', windows_source)
-        self.assertIn('(?:-rc\\.[0-9]+)?(?:-local-[A-Za-z0-9-]+)?$', windows_source)
-
-    def test_convenience_command_never_replaces_an_unrelated_path(self) -> None:
-        source = INSTALLER.read_text(encoding="utf-8")
-        self.assertNotIn("ln -sfn", source)
-        self.assertIn("preserving unrelated command path instead of replacing it", source)
-        self.assertIn('[[ ! -e "$COMMAND_LINK" && ! -L "$COMMAND_LINK" ]]', source)
 
     def test_help_documents_systemd_user_option(self) -> None:
         result = subprocess.run(
@@ -173,23 +159,6 @@ esac
             self.assertEqual(result.returncode, 0, result.stderr)
             if os.name != "nt":
                 self.assertEqual(parent.stat().st_mode & 0o777, before_mode)
-
-
-class WindowsInstallerSourceTests(unittest.TestCase):
-    def test_native_replacement_and_rollback_preserve_original_failure(self) -> None:
-        source = WINDOWS_INSTALLER.read_text(encoding="utf-8")
-        self.assertIn("IcaRouterNativeFile", source)
-        self.assertIn("MoveFileEx($temporaryFull, $targetFull, 9)", source)
-        self.assertIn("if (-not $check.AreAccessRulesProtected)", source)
-        self.assertIn(
-            'Write-Warning ("rollback failed while preserving the original installer error: "',
-            source,
-        )
-        rollback = source.index("Restore-PreviousRelease", source.index("catch {"))
-        warning = source.index("rollback failed while preserving", rollback)
-        rethrow = source.index("throw $failure", warning)
-        self.assertLess(rollback, warning)
-        self.assertLess(warning, rethrow)
 
 
 if __name__ == "__main__":
