@@ -518,6 +518,7 @@ if [[ "$SYSTEMD_TOUCH_UNIT" == "1" && "$SYSTEMD_UNIT_EXISTED" == "1" ]]; then
   cp -- "$SYSTEMD_UNIT_PATH" "$ROLLBACK_DIR/systemd.unit"
   chmod 600 "$ROLLBACK_DIR/systemd.unit"
 fi
+# Keep the retired client snapshot only so a failed update can restore an older release.
 for name in secrets.json config.yaml client-models.generated.json runtime.json generation.json; do
   if [[ -e "$STATE_DIR/$name" || -L "$STATE_DIR/$name" ]]; then
     [[ -f "$STATE_DIR/$name" && ! -L "$STATE_DIR/$name" ]] || die "unsafe state file: $name"

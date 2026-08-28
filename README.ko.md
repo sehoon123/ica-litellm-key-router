@@ -505,7 +505,7 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $router stop
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $router start
 ```
 
-Lifecycle command는 private `state/command.lock`의 OS lock을 사용합니다. `run.json`에는 PID, process creation token, executable, config path와 digest, host, port가 기록됩니다. `stop`은 creation token과 command line이 모두 맞는 process에만 signal을 보내며, 살아 있는 PID의 identity가 다르면 거부합니다.
+Lifecycle command는 private `state/command.lock`의 OS lock을 사용합니다. `run.json`에는 PID, process creation token, executable, config path와 digest가 기록됩니다. `stop`은 creation token과 command line이 모두 맞는 process에만 signal을 보내며, 살아 있는 PID의 identity가 다르면 거부합니다.
 
 `start`는 state를 검증하고, foreign listener를 거부하고, worker 한 개를 시작하고 identity를 기록합니다. 그런 다음 process identity, `/health/liveliness`, 설정 alias가 포함된 인증된 `/v1/models` 응답을 기다립니다. 이 readiness check는 IBM을 호출하지 않습니다.
 
@@ -541,7 +541,7 @@ ica-router configure-harnesses --prime
 
 `client-token`은 생성된 command-backed 인증용입니다. 현재 local credential만 출력하며 `--bearer`를 사용하면 `Bearer <credential>`을 출력하므로 secret을 출력하는 command로 취급해야 합니다.
 
-영구 state에는 `secrets.json`, `config.yaml`(YAML로 유효한 JSON), `client-models.generated.json`, `runtime.json`, `generation.json`이 있습니다. Generation marker는 catalog, secrets, 생성 config, 생성 client, runtime의 normalized digest를 묶습니다. 마지막에 기록되므로 multi-file 생성이 중단되면 fail-closed합니다. Lifecycle file은 `command.lock`, 실행 중에만 존재하는 `run.json`, `router.log`입니다. 10 MiB를 넘는 log는 `router.log.1`로 rotate됩니다. Private `process-home`, `process-cache`, `process-tmp`는 caller home에서 LiteLLM을 격리하지만 dependency cache나 임시 data가 남을 수 있으므로 state 보호 및 retention 대상에 포함하십시오.
+영구 state에는 `secrets.json`, `config.yaml`(YAML로 유효한 JSON), `runtime.json`, `generation.json`이 있습니다. Client 설정은 선택한 client file을 merge할 때만 생성합니다. Generation marker는 catalog, secrets, 생성 config, runtime의 normalized digest를 묶고 마지막에 기록되므로 중단된 생성은 fail-closed합니다. Lifecycle file은 `command.lock`, 실행 중에만 존재하는 `run.json`, `router.log`입니다. 10 MiB를 넘는 log는 `router.log.1`로 rotate됩니다. Private `process-home`, `process-cache`, `process-tmp`는 caller home에서 LiteLLM을 격리하지만 dependency cache나 임시 data가 남을 수 있으므로 state 보호 및 retention 대상에 포함하십시오.
 
 ## 문제 해결
 

@@ -505,7 +505,7 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $router stop
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $router start
 ```
 
-Lifecycle commands use OS locking on private `state/command.lock`. `run.json` records the PID, process creation token, executable, config path and digest, host, and port. `stop` signals only a process whose creation token and command line match; it refuses a mismatched live PID.
+Lifecycle commands use OS locking on private `state/command.lock`. `run.json` records the PID, process creation token, executable, and config path/digest. `stop` signals only a process whose creation token and command line match; it refuses a mismatched live PID.
 
 `start` validates state, refuses a foreign listener, starts one worker, records identity, and waits for process identity, `/health/liveliness`, and an authenticated `/v1/models` response containing a configured alias. It does not contact IBM for that readiness check.
 
@@ -541,7 +541,7 @@ ica-router configure-harnesses --prime
 
 `client-token` is intended for generated command-backed authentication. It prints only the current local credential (or `Bearer <credential>` with `--bearer`) and must be treated as a secret-producing command.
 
-Persistent state includes `secrets.json`, `config.yaml` (JSON valid as YAML), `client-models.generated.json`, `runtime.json`, and `generation.json`. The generation marker binds normalized digests of catalog, secrets, generated config, generated clients, and runtime. It is written last so an interrupted multi-file generation fails closed. Lifecycle files are `command.lock`, transient `run.json`, and `router.log`; logs above 10 MiB rotate to `router.log.1`. Private `process-home`, `process-cache`, and `process-tmp` directories isolate LiteLLM from the caller's home but can retain dependency cache or temporary data, so include them in state protection and retention handling.
+Persistent state includes `secrets.json`, `config.yaml` (JSON valid as YAML), `runtime.json`, and `generation.json`. Client configuration is generated only when merging a selected client file. The generation marker binds normalized digests of catalog, secrets, generated config, and runtime; it is written last so interrupted generation fails closed. Lifecycle files are `command.lock`, transient `run.json`, and `router.log`; logs above 10 MiB rotate to `router.log.1`. Private `process-home`, `process-cache`, and `process-tmp` directories isolate LiteLLM from the caller's home but can retain dependency cache or temporary data, so include them in state protection and retention handling.
 
 ## Troubleshooting
 

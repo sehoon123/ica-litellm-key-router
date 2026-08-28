@@ -603,7 +603,15 @@ class RouterConfigTests(unittest.TestCase):
             routerctl.atomic_write(
                 state / "secrets.json", json.dumps(self.secrets) + "\n", private=True
             )
+            routerctl.atomic_write(
+                state / "client-models.generated.json", "{}\n", private=True
+            )
             routerctl.write_generated_state(state, self.catalog, self.secrets, "127.0.0.1", 4000, 2, 60)
+            self.assertFalse((state / "client-models.generated.json").exists())
+            generation = routerctl.load_private_json(
+                state / "generation.json", "generation"
+            )
+            self.assertNotIn("generatedClients", generation["documents"])
             loaded_catalog, loaded_secrets, runtime = routerctl.load_state(
                 state, ROOT / "catalog.json"
             )
@@ -883,17 +891,11 @@ class RouterConfigTests(unittest.TestCase):
             routerctl.cmd_bootstrap(args)
             fresh_runtime = routerctl.load_private_json(fresh_state / "runtime.json", "runtime")
             self.assertEqual(fresh_runtime["port"], 4000)
-            fresh_clients = routerctl.load_private_json(
-                fresh_state / "client-models.generated.json", "clients"
-            )
-            self.assertTrue(all(":4000" in provider["baseUrl"] for provider in fresh_clients["providers"].values()))
 
             args.state_dir = state
             routerctl.cmd_bootstrap(args)
             runtime = routerctl.load_private_json(state / "runtime.json", "runtime")
             self.assertEqual((runtime["port"], runtime["maxFallbacks"], runtime["cooldownSeconds"]), (4100, 7, 123))
-            clients = routerctl.load_private_json(state / "client-models.generated.json", "clients")
-            self.assertTrue(all(":4100" in provider["baseUrl"] for provider in clients["providers"].values()))
 
             rotator = root / "rotator.json"
             rotator.write_text(
@@ -918,8 +920,6 @@ class RouterConfigTests(unittest.TestCase):
             self.assertEqual(self.secrets["masterKey"], replaced_secrets["masterKey"])
             runtime = routerctl.load_private_json(state / "runtime.json", "runtime")
             self.assertEqual((runtime["port"], runtime["maxFallbacks"], runtime["cooldownSeconds"]), (4100, 7, 123))
-            clients = routerctl.load_private_json(state / "client-models.generated.json", "clients")
-            self.assertTrue(all(":4100" in provider["baseUrl"] for provider in clients["providers"].values()))
 
     def test_dead_run_state_does_not_hide_foreign_listener(self) -> None:
         import socket

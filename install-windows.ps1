@@ -30,6 +30,7 @@ $UvBin = Join-Path $ToolsDir "uv.exe"
 $TempSource = $null
 $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $CurrentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$SystemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 if ($SourceRef -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[0-9]+)?$') {
     throw "ICA_ROUTER_REF must be an exact vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rc.N tag"
@@ -176,7 +177,7 @@ function Install-VerifiedUv {
     if ($actual -ne $script:UvInstallerSha256) { throw "uv installer SHA-256 mismatch" }
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $psi.FileName = $SystemPowerShell
         $psi.UseShellExecute = $false
         $installerCommand = '& $env:ICA_VERIFIED_UV_INSTALLER; exit $LASTEXITCODE'
         $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($installerCommand))
@@ -293,11 +294,17 @@ foreach ($requestedPath in $ModelsJson) {
 $ClientPaths = @($ClientPaths | Select-Object -Unique)
 
 function Invoke-InstalledRouter([string]$Wrapper, [string[]]$Arguments) {
-    $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    & $systemPowerShell -NoProfile -ExecutionPolicy Bypass -File $Wrapper @Arguments
+    & $SystemPowerShell -NoProfile -ExecutionPolicy Bypass -File $Wrapper @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "ica-router command failed ($LASTEXITCODE): $($Arguments -join ' ')"
     }
+}
+
+function Write-ModelsHint([string]$RouterWrapper) {
+    Write-Host 'Pi models.json was not modified.'
+    Write-Host '  During install: rerun with -PiModels.'
+    Write-Host '  Or without stopping the router:'
+    Write-Host "    powershell -File `"$RouterWrapper`" configure-harnesses --pi"
 }
 
 $ExistingWrapper = Join-Path $InstallRoot 'ica-router.ps1'
@@ -332,8 +339,7 @@ if (-not $ForceInstall -and
         if (-not $sourceChanged -and
             (Test-Path -LiteralPath $existingComplete) -and
             (Test-Path -LiteralPath (Join-Path $ExistingRelease '.venv\Scripts\python.exe'))) {
-            $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            & $systemPowerShell -NoProfile -ExecutionPolicy Bypass -File $ExistingWrapper doctor *> $null
+            & $SystemPowerShell -NoProfile -ExecutionPolicy Bypass -File $ExistingWrapper doctor *> $null
             $ExistingReady = $LASTEXITCODE -eq 0
         }
     }
@@ -372,16 +378,11 @@ if ($ExistingReady) {
         Invoke-InstalledRouter $ExistingWrapper @('start')
         Invoke-InstalledRouter $ExistingWrapper @('status')
         if ($ClientPaths.Count -eq 0) {
-            Write-Host 'Pi models.json was not modified.'
-            Write-Host '  Easiest: rerun this installer with -PiModels.'
-            Write-Host '  Or separately:'
-            Write-Host "    powershell -File `"$ExistingWrapper`" stop"
-            Write-Host "    powershell -File `"$ExistingWrapper`" configure-clients --client `"$HOME\.pi\agent\models.json`""
-            Write-Host "    powershell -File `"$ExistingWrapper`" start"
+            Write-ModelsHint $ExistingWrapper
         }
     }
     catch {
-        & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $ExistingWrapper start *> $null
+        & $SystemPowerShell -NoProfile -ExecutionPolicy Bypass -File $ExistingWrapper start *> $null
         throw
     }
     finally {
@@ -560,6 +561,7 @@ exit $LASTEXITCODE
     [void][System.IO.Directory]::CreateDirectory($rollbackState)
     [void][System.IO.Directory]::CreateDirectory($rollbackClients)
     Set-PrivateAcl $RollbackDir; Set-PrivateAcl $rollbackState; Set-PrivateAcl $rollbackClients
+    # Retain the retired client snapshot only so an older release can be restored.
     foreach ($name in @('secrets.json','config.yaml','client-models.generated.json','runtime.json','generation.json')) {
         $sourceState = Join-Path $StateDir $name
         if (Test-Path -LiteralPath $sourceState) {
@@ -672,12 +674,7 @@ exit $LASTEXITCODE
     if ($ClientPaths.Count -gt 0) {
         Write-Host "Restart Pi/prime-agent, then select a provider ending in '-router'."
     } else {
-        Write-Host 'Pi models.json was not modified.'
-        Write-Host '  Easiest: rerun this installer with -PiModels.'
-        Write-Host '  Or separately:'
-        Write-Host "    powershell -File `"$Wrapper`" stop"
-        Write-Host "    powershell -File `"$Wrapper`" configure-clients --client `"$HOME\.pi\agent\models.json`""
-        Write-Host "    powershell -File `"$Wrapper`" start"
+        Write-ModelsHint $Wrapper
     }
 }
 catch {

@@ -70,7 +70,6 @@ Protect:
 - every IBM ICA upstream credential;
 - the local router master key;
 - `<install-root>/state/secrets.json` and any backup;
-- `client-models.generated.json` and command-backed helper paths;
 - modified Pi/prime-agent and Claude Code files, the dedicated Codex profile, and their whole-file timestamped backups;
 - temporary installer rollback snapshots;
 - state-owned `process-home`, `process-cache`, and `process-tmp`, which can retain dependency cache or temporary data;
@@ -89,11 +88,11 @@ Protect:
 - **Loopback-only listener.** Host validation rejects non-`127.0.0.1` addresses.
 - **Local authentication.** LiteLLM requires the local master key for authenticated proxy routes.
 - **Raw-key exclusion from generated config.** `config.yaml` uses environment references, and `doctor` checks known raw values are absent.
-- **Fail-closed generated state.** `generation.json` binds normalized digests of catalog, secrets, generated config, generated clients, and runtime; an interrupted or partial rewrite is rejected.
+- **Fail-closed generated state.** `generation.json` binds normalized digests of catalog, secrets, generated config, and runtime; an interrupted or partial rewrite is rejected. Selected client files are outside this marker.
 - **Private local files.** Unix control-plane private directories/files use `0700`/`0600`. Windows control-plane restriction removes inheritance, sets the current user as owner, allows only that SID, verifies the result, and fails closed; runtime-created cache/temp descendants inherit current-user-only access from protected parents.
 - **Safer imports.** Key-rotator `command` sources are refused instead of executed. Literal and available environment-backed values are copied into private state.
 - **Safer client merge.** Unrelated provider IDs are retained, changed files are backed up, and writes use replacement rather than in-place truncation.
-- **Process identity fencing.** `run.json` records creation identity, executable, config path/digest, host, and port. `stop` refuses to signal a mismatched live PID.
+- **Process identity fencing.** `run.json` records creation identity, executable, and config path/digest. `stop` refuses to signal a mismatched live PID.
 - **Command serialization.** OS locks on `command.lock` serialize lifecycle and state-changing commands. Installer-wide locks serialize installation/update attempts.
 - **Startup readiness and supervision.** `start` verifies process identity, local liveness, and an authenticated model list containing a configured alias without calling IBM. The optional systemd user unit runs the worker in the foreground, performs the same authenticated readiness check, and restarts failures.
 - **Bounded release extraction.** Remote installers reject ZIP traversal, links/special files, collisions, unexpected top-level names, excessive members, and excessive expanded data.

@@ -60,7 +60,6 @@ SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SYSTEMD_UNIT_NAME = "ica-litellm-key-router.service"
 SYSTEMD_UNIT_MARKER = "# Managed by ICA LiteLLM Key Router"
 DEFAULT_CLAUDE_MODEL = "ica-se-claude--claude-opus-5"
-DEFAULT_CLAUDE_OPUS_MODEL = DEFAULT_CLAUDE_MODEL
 DEFAULT_CLAUDE_SONNET_MODEL = "ica-se-claude--claude-sonnet-5"
 DEFAULT_CLAUDE_HAIKU_MODEL = "ica-se-claude--claude-haiku-4-5"
 DEFAULT_CODEX_MODEL = "ica-se-openai--gpt-5.6-sol"
@@ -854,7 +853,6 @@ def write_generated_state(
 ) -> None:
     ensure_private_directory(state_dir)
     config = generate_litellm_config(catalog, secrets_doc, max_fallbacks, cooldown_seconds)
-    generated_clients = generate_client_providers(catalog, host, port, state_dir)
     runtime = validate_runtime(
         {
             "schemaVersion": SCHEMA_VERSION,
@@ -868,18 +866,16 @@ def write_generated_state(
         "catalog": catalog,
         "secrets": secrets_doc,
         "config": config,
-        "generatedClients": generated_clients,
         "runtime": runtime,
     }
     # JSON is valid YAML. Write the generation marker last. A crash between
     # individual atomic replacements then fails closed on the next load.
     atomic_write(state_dir / "config.yaml", json.dumps(config, indent=2) + "\n", private=True)
-    atomic_write(
-        state_dir / "client-models.generated.json",
-        json.dumps(generated_clients, ensure_ascii=False, indent=2) + "\n",
-        private=True,
-    )
     atomic_write(state_dir / "runtime.json", json.dumps(runtime, indent=2) + "\n", private=True)
+    legacy_clients = state_dir / "client-models.generated.json"
+    if legacy_clients.exists() or legacy_clients.is_symlink():
+        _reject_unsafe_existing_file(legacy_clients, "legacy generated client models")
+        legacy_clients.unlink()
     generation = {
         "schemaVersion": SCHEMA_VERSION,
         "documents": {name: document_digest(value) for name, value in documents.items()},
@@ -912,15 +908,11 @@ def load_state(state_dir: Path, catalog_path: Path) -> tuple[dict[str, Any], dic
     secrets_doc = validate_secrets(load_private_json(state_dir / "secrets.json", "secrets"), catalog)
     runtime = validate_runtime(load_private_json(state_dir / "runtime.json", "runtime settings"))
     config = load_private_json(state_dir / "config.yaml", "generated LiteLLM config")
-    generated_clients = load_private_json(
-        state_dir / "client-models.generated.json", "generated client models"
-    )
     generation = load_private_json(state_dir / "generation.json", "generation marker")
     documents = {
         "catalog": catalog,
         "secrets": secrets_doc,
         "config": config,
-        "generatedClients": generated_clients,
         "runtime": runtime,
     }
     expected = {name: document_digest(value) for name, value in documents.items()}
@@ -1382,7 +1374,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         max_fallbacks,
         cooldown_seconds,
     )
-    for private_name in ("config.yaml", "client-models.generated.json", "runtime.json"):
+    for private_name in ("config.yaml", "runtime.json"):
         restrict_windows_file(state_dir / private_name)
     client_paths: list[Path] = []
     client_values = [] if args.no_configure_clients else (args.client or ["auto"])
@@ -1502,7 +1494,7 @@ def render_claude_code_settings(
         {
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": model,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": DEFAULT_CLAUDE_OPUS_MODEL,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": DEFAULT_CLAUDE_MODEL,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": DEFAULT_CLAUDE_SONNET_MODEL,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": DEFAULT_CLAUDE_HAIKU_MODEL,
         }
@@ -1893,8 +1885,6 @@ def process_start_token(pid: int) -> str | None:
 def process_command_line(pid: int) -> str | None:
     if not process_alive(pid):
         return None
-    if os.name == "nt":
-        return windows_process_image(pid)
     result = subprocess.run(
         [posix_system_command("ps"), "-ww", "-p", str(pid), "-o", "command="],
         capture_output=True,
@@ -1911,7 +1901,7 @@ def load_run_state(path: Path) -> dict[str, Any] | None:
     document = load_private_json(path, "router run state")
     required = {
         "schemaVersion", "pid", "startToken", "executable", "configPath",
-        "configSha256", "host", "port"
+        "configSha256"
     }
     if not isinstance(document, dict) or not required.issubset(document):
         raise ConfigError(f"invalid router run state: {path}")
@@ -2206,14 +2196,11 @@ def prepare_router_log(state_dir: Path) -> Path:
 
 
 def router_run_document(
-    args: argparse.Namespace,
     pid: int,
     start_token: str,
     litellm_cmd: list[str],
     config_path: Path,
     config_sha256: str,
-    host: str,
-    port: int,
 ) -> dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -2222,11 +2209,6 @@ def router_run_document(
         "executable": str(Path(litellm_cmd[0]).resolve()),
         "configPath": str(config_path.resolve()),
         "configSha256": config_sha256,
-        "catalogPath": str(args.catalog),
-        "venvPath": str(args.venv),
-        "host": host,
-        "port": port,
-        "startedAt": int(time.time()),
     }
 
 
@@ -2287,14 +2269,11 @@ def cmd_start_worker(args: argparse.Namespace) -> int:
             if start_token is None:
                 raise ConfigError(f"router exited before process identity could be recorded; inspect private log: {log_path}")
             run_document = router_run_document(
-                args,
                 child.pid,
                 start_token,
                 litellm_cmd,
                 config_path,
                 config_sha256,
-                host,
-                port,
             )
             atomic_write(run_path, json.dumps(run_document, indent=2) + "\n", private=True)
             restrict_windows_file(run_path)
@@ -2369,14 +2348,11 @@ def cmd_run_foreground(args: argparse.Namespace) -> int:
         if start_token is None:
             raise ConfigError("could not record foreground router process identity")
         run_document = router_run_document(
-            args,
             pid,
             start_token,
             litellm_cmd,
             config_path,
             config_sha256,
-            host,
-            port,
         )
         atomic_write(run_path, json.dumps(run_document, indent=2) + "\n", private=True)
         restrict_windows_file(run_path)
@@ -2508,7 +2484,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if secrets_doc["masterKey"] in rendered:
         raise ConfigError("raw master key leaked into generated LiteLLM config")
     if os.name != "nt":
-        for name in ("secrets.json", "config.yaml", "client-models.generated.json", "runtime.json", "generation.json"):
+        for name in ("secrets.json", "config.yaml", "runtime.json", "generation.json"):
             mode = (args.state_dir / name).stat().st_mode & 0o777
             if mode & 0o077:
                 raise ConfigError(f"private file permissions are too broad: {name} mode={oct(mode)}")

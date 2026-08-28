@@ -44,8 +44,8 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Compile Python sources
-        run: python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
+      - name: Compile Python sources not imported by tests
+        run: python -m py_compile tools/litellm_no_log.py scripts/build-release.py
 
       - name: Check Bash syntax
         run: bash -n install-linux.sh
@@ -74,21 +74,6 @@ jobs:
               if current.resolve() != new_release.resolve() or candidate.exists():
                   raise SystemExit("atomic current-pointer replacement regression")
           PY
-
-      - name: Parse PowerShell installer on Ubuntu
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path ./install-windows.ps1),
-            [ref]$tokens,
-            [ref]$parseErrors
-          ) | Out-Null
-          if ($parseErrors.Count -ne 0) {
-            $parseErrors | ForEach-Object { Write-Error $_.Message }
-            exit 1
-          }
 
       - name: Validate public files contain placeholders only
         shell: bash
@@ -405,10 +390,16 @@ jobs:
           client_path = Path(sys.argv[2])
           state = root / "state"
           catalog = json.loads((root / "current" / "app" / "catalog.json").read_text())
-          generated = json.loads((state / "client-models.generated.json").read_text())
           config = json.loads((state / "config.yaml").read_text())
           secrets = json.loads((state / "secrets.json").read_text())
           client = json.loads(client_path.read_text())
+          generated = {
+              "providers": {
+                  name: provider
+                  for name, provider in client["providers"].items()
+                  if name.endswith("-router")
+              }
+          }
           aliases = {
               f"{provider_id}/{model['id']}"
               for provider_id, provider in catalog["providers"].items()
@@ -540,14 +531,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      - name: Run unit tests and compile with exact Python 3.12.13
+      - name: Run unit tests with exact Python 3.12.13
         shell: pwsh
         run: |
           uv python install 3.12.13
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv run --no-project --python 3.12.13 python -m unittest discover -s tests -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run --no-project --python 3.12.13 python -m py_compile tools/routerctl.py tools/litellm_no_log.py tests/test_routerctl.py tests/test_litellm_no_log.py scripts/build-release.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Parse PowerShell installer on Windows
@@ -658,20 +647,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "status exited with $LASTEXITCODE" }
 
           $state = Join-Path $installRoot "state"
-          $clientConfig = Get-Content -Raw -LiteralPath (Join-Path $state "client-models.generated.json") | ConvertFrom-Json
+          $mergedClient = Get-Content -Raw -LiteralPath $clientPath | ConvertFrom-Json
           $secretsConfig = Get-Content -Raw -LiteralPath (Join-Path $state "secrets.json") | ConvertFrom-Json
           $clientToken = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper client-token | Out-String).Trim()
           if ($clientToken -ne $secretsConfig.masterKey) { throw "client-token did not return the local master key" }
-          $apiKeyCommand = $clientConfig.providers."ica-se-openai-router".apiKey
+          $apiKeyCommand = $mergedClient.providers."ica-se-openai-router".apiKey
           if (-not $apiKeyCommand.StartsWith("!")) { throw "Generated apiKey is not command-backed" }
           $shellToken = (& $env:ComSpec /D /S /C $apiKeyCommand.Substring(1) | Out-String).Trim()
           if ($shellToken -ne $secretsConfig.masterKey) { throw "Windows shell helper did not return the local master key" }
-          if ((Get-Content -Raw -LiteralPath (Join-Path $state "client-models.generated.json")).Contains($secretsConfig.masterKey)) {
-            throw "Generated client config persisted the local master key"
+          if ((Get-Content -Raw -LiteralPath $clientPath).Contains($secretsConfig.masterKey)) {
+            throw "Merged client config persisted the local master key"
           }
-          $providerCount = @($clientConfig.providers.PSObject.Properties).Count
+          $routerProviders = @(
+            $mergedClient.providers.PSObject.Properties |
+              Where-Object { $_.Name.EndsWith("-router") }
+          )
+          $providerCount = $routerProviders.Count
           $modelCount = 0
-          foreach ($provider in $clientConfig.providers.PSObject.Properties.Value) {
+          foreach ($provider in $routerProviders.Value) {
             $modelCount += @($provider.models).Count
             if ($provider.apiKey -ne $apiKeyCommand) {
               throw "Generated providers do not share the validated command-backed authentication helper"
@@ -685,7 +678,6 @@ jobs:
             throw "Expected 24 deployments with two Services Essentials dummy keys"
           }
 
-          $mergedClient = Get-Content -Raw -LiteralPath $clientPath | ConvertFrom-Json
           if ($null -eq $mergedClient.providers."keep-ci-dummy") {
             throw "Installer removed an unrelated client provider"
           }
@@ -816,8 +808,7 @@ jobs:
           # A post-switch bootstrap failure must restore pointer, core state,
           # requested client data, and a running prior router.
           $coreStateNames = @(
-            "secrets.json", "config.yaml", "client-models.generated.json",
-            "runtime.json", "generation.json"
+            "secrets.json", "config.yaml", "runtime.json", "generation.json"
           )
           $stateSnapshots = @{}
           foreach ($name in $coreStateNames) {
